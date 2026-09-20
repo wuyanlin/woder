@@ -60,7 +60,10 @@ jobs:
         env:
           # 没有开发者证书，明确关掉自动找身份的逻辑，免得卡在 keychain 上
           CSC_IDENTITY_AUTO_DISCOVERY: 'false'
-        run: npm run build
+        # --publish never：CI 环境下 electron-builder 默认走 onTagOrDraft，
+        # 而「查有没有草稿 Release」这一步本身要调 GitHub API，没 token 就整个 job 红。
+        # 发布统一交给下面的 release job 做。
+        run: npm run build -- --publish never
       - uses: actions/upload-artifact@v4
         with:
           name: woder-mac-arm64
@@ -95,7 +98,7 @@ jobs:
       # win32-x64，而且脚本里的 spawnSync('npx') 在 Windows 上起不来
       - name: 打 exe
         shell: bash
-        run: npx electron-builder --win --x64
+        run: npx electron-builder --win --x64 --publish never
       - uses: actions/upload-artifact@v4
         with:
           name: woder-win-x64
