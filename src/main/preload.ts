@@ -6,13 +6,12 @@ import { contextBridge, ipcRenderer } from 'electron';
 
 contextBridge.exposeInMainWorld('woder', {
   task: {
-    /** history 是当前会话里前面几轮的问答，规划时一起带上，「继续」这类需求才有依据；
-        images 是用户随需求附的图片，主进程清洗后拼成多模态 content */
-    plan: (request: string, workspaceId?: string, history?: unknown[], images?: unknown[]) =>
-      ipcRenderer.invoke('task:plan', request, workspaceId, history, images),
-    /** usageRecordId 是 task:plan 落的用量行，执行阶段的 token 并回同一行 */
-    executePlan: (plan: unknown, workspaceId?: string, usageRecordId?: number) =>
-      ipcRenderer.invoke('task:execute-plan', plan, workspaceId, usageRecordId)
+    /** 跑一轮需求：模型可用时走 agentic 循环，过程用 onTaskEvent 推回来。
+        taskId 由界面先生成，事件才能在第一刻就归到这条回答上 */
+    run: (payload: { taskId: string; request: string; history?: unknown[]; images?: unknown[]; autoApprove?: boolean }, workspaceId?: string) =>
+      ipcRenderer.invoke('task:run', payload, workspaceId),
+    /** 点「停止」：翻掉那一轮的取消令牌 */
+    cancel: (taskId: string) => ipcRenderer.invoke('task:cancel', taskId)
   },
 
   usage: {

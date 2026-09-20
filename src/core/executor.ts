@@ -8,9 +8,22 @@ import { spawn } from 'child_process';
 import { TaskPlan, TaskStep } from './planner';
 import { FileSkill } from '../skills/file-skill';
 import { AIEngine } from './ai-engine';
+import { isMutating } from './tools';
 import { diffLines, FileDiff } from './diff';
 
 export type StepStatus = 'pending' | 'running' | 'completed' | 'failed' | 'skipped';
+
+/** 检索遍历到的一个条目，rel 是以 / 分隔的相对路径 */
+export interface WalkEntry {
+  name: string;
+  kind: 'file' | 'directory';
+  full: string;
+  rel: string;
+  size: number;
+}
+
+/** 命中数够了就从回调里抛出来终止遍历，比给 walk 加一堆返回值标记干净 */
+const COUNTED = Symbol('counted');
 
 /**
  * 内置浏览器活在渲染层，主进程只能把动作下发过去等回执。
@@ -34,6 +47,22 @@ export interface ExecutionEvent {
 }
 
 export type EventSink = (event: ExecutionEvent) => void;
+
+/** 取消令牌：一次执行的句柄，用户点「停止」时把它翻掉，正在跑的动作尽快收尾 */
+export interface CancelToken {
+  aborted: boolean;
+}
+
+export interface RunOptions {
+  /** 上一步的输出：ai.summarize 不带 text/path 时拿它 */
+  lastOutput?: string;
+  token?: CancelToken;
+  /**
+   * 关掉自动放行时由调用方注入：改动类动作执行前先征求同意，被拒就抛错。
+   * 哪些动作算「改动」由 tools.ts 的注册表说了算，不在这里另列一份名单。
+   */
+  approve?: (action: string, p: Record<string, any>) => Promise<void>;
+}
 
 /** 向用户提问要等多久：半小时够人去干别的，再久就当这一步失败，别把任务永久挂住 */
 const ASK_TIMEOUT_MS = 30 * 60_000;
@@ -68,7 +97,97 @@ export class Executor {
     return normalized;
   }
 
-  async run(plan: TaskPlan, emit: EventSink): Promise<ExecutionSummary> {
+  /** 递归检索时的护栏：这些目录体量巨大，默认不下潜，把 path 直接指过去才搜 */
+  private readonly SKIP_DIRS = new Set([
+    'node_modules', '.git', '.svn', 'dist', 'release', 'out', 'build', '.cache', '.next', '__pycache__', '.venv', 'venv'
+  ]);
+  private readonly MAX_DEPTH = 12;
+
+  /**
+   * 名字匹配：带 * / ? 时按整名 glob 匹配；
+   * 只给一个词（模型经常这么干）就退化成「名字里含有」，别让它空手而归。
+   */
+  private nameMatcher(pattern: string): RegExp {
+    const bare = pattern.replace(/^\.\/+/, '').replace(/^\/+|\/+$/g, '');
+    if (!/[*?]/.test(bare)) return new RegExp(`.*${bare.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}.*`, 'i');
+    const body = bare
+      .replace(/[.+^${}()|[\]\\]/g, '\\$&')
+      .replace(/\*/g, '[^/]*')
+      .replace(/\?/g, '[^/]');
+    return new RegExp(`^${body}$`, 'i');
+  }
+
+  private clampCount(value: unknown, fallback: number, max: number): number {
+    const n = Math.floor(Number(value));
+    return Number.isFinite(n) && n > 0 ? Math.min(n, max) : fallback;
+  }
+
+  /** 遍历目录树。onEntry 返回 false 表示不下潜该目录，抛 COUNTED 表示整体收工 */
+  private walk(root: string, onEntry: (entry: WalkEntry, rel: string) => boolean | void): void {
+    const step = (dir: string, depth: number): boolean => {
+      let entries: fs.Dirent[];
+      try {
+        entries = fs.readdirSync(dir, { withFileTypes: true });
+      } catch {
+        return true;   // 没权限/已经没了，跳过这一支
+      }
+      for (const e of entries) {
+        const full = path.join(dir, e.name);
+        if (e.isSymbolicLink()) continue;
+        const kind: WalkEntry['kind'] = e.isDirectory() ? 'directory' : 'file';
+        let size = 0;
+        if (kind === 'file') {
+          try {
+            size = fs.statSync(full).size;
+          } catch {
+            continue;
+          }
+        }
+        const rel = path.relative(root, full).split(path.sep).join('/');
+        let descend = true;
+        try {
+          descend = onEntry({ name: e.name, kind, full, rel, size }, rel) !== false;
+        } catch (err) {
+          if (err === COUNTED) return false;
+          throw err;
+        }
+        if (descend && kind === 'directory' && depth < this.MAX_DEPTH && step(full, depth + 1) === false) return false;
+      }
+      return true;
+    };
+    step(path.resolve(root), 0);
+  }
+
+  /** 读文本文件；二进制（开头就有空字节）、读不动的一律返回 null 跳过 */
+  private readTextFile(full: string): string | null {
+    try {
+      const buf = fs.readFileSync(full);
+      if (buf.subarray(0, 1024).includes(0)) return null;
+      return buf.toString('utf-8');
+    } catch {
+      return null;
+    }
+  }
+
+  private findText(label: string, hits: string[], skipped: Set<string>, limit: number): string {
+    const head = hits.length
+      ? `${label}：${hits.length} 处${hits.length >= limit ? `（已达上限 ${limit}，把 pattern 或 path 收窄一点）` : ''}`
+      : `${label}：没有命中`;
+    const note = skipped.size
+      ? `\n（默认跳过了 ${[...skipped].join('、')} 这类目录，确实要搜就把 path 直接指到那里）`
+      : '';
+    return `${head}\n${hits.slice(0, limit).join('\n')}${note}`;
+  }
+
+  /** 工具输出要回灌给模型，太长会挤掉上下文，头尾各留一段 */
+  private clipOut(text: string, max = 6000): string {
+    if (text.length <= max) return text;
+    const head = text.slice(0, Math.floor(max * 0.75));
+    const tail = text.slice(-Math.floor(max * 0.15));
+    return `${head}\n⋯ 省略 ${text.length - head.length - tail.length} 字 ⋯\n${tail}`;
+  }
+
+  async run(plan: TaskPlan, emit: EventSink, opts: RunOptions = {}): Promise<ExecutionSummary> {
     const status = new Map<string, StepStatus>();
     const diffs: FileDiff[] = [];
     let completed = 0;
@@ -105,6 +224,14 @@ export class Executor {
         const blocked = (step.dependsOn ?? []).some(dep => status.get(dep) !== 'completed');
         remaining = remaining.filter(s => s.id !== step.id);
 
+        if (opts.token?.aborted) {
+          // 已经取消：当前这一步和后面排到的都记成跳过，别再往下跑
+          status.set(step.id, 'skipped');
+          skipped++;
+          emit(this.event(plan.taskId, step, 'skipped', '已取消，未执行'));
+          continue;
+        }
+
         if (blocked) {
           status.set(step.id, 'skipped');
           skipped++;
@@ -116,7 +243,7 @@ export class Executor {
         emit(this.event(plan.taskId, step, 'running'));
 
         try {
-          const { output, diff } = await this.dispatch(step, lastOutput);
+          const { output, diff } = await this.dispatch(step.action, step.params ?? {}, { ...opts, lastOutput });
           if (output) lastOutput = output;
           if (diff) diffs.push(diff);
           status.set(step.id, 'completed');
@@ -160,7 +287,7 @@ export class Executor {
    * 输出可能非常大（npm install、find），所以只留头尾；
    * 非零退出码按失败处理，并把输出尾巴塞进错误信息，界面第三层才有东西可看。
    */
-  private runShell(command: string, cwd: string, timeoutMs: number): Promise<string> {
+  private runShell(command: string, cwd: string, timeoutMs: number, token?: CancelToken): Promise<string> {
     return new Promise((resolve, reject) => {
       const startedAt = Date.now();
       const child = spawn(command, { cwd, shell: true, env: process.env });
@@ -177,17 +304,32 @@ export class Executor {
         ));
       }, timeoutMs);
 
+      // 取消不是等超时：每 200ms 看一眼令牌，用户点停止就该立刻断
+      const poll: NodeJS.Timeout | undefined = token
+        ? setInterval(() => {
+            if (settled || !token.aborted) return;
+            settled = true;
+            clearInterval(poll);
+            clearTimeout(timer);
+            child.kill('SIGKILL');
+            reject(new Error('已取消，命令被终止'));
+          }, 200)
+        : undefined;
+      const stopPolling = () => { if (poll) clearInterval(poll); };
+
       child.stdout?.on('data', chunk => { stdout += String(chunk); });
       child.stderr?.on('data', chunk => { stderr += String(chunk); });
       child.on('error', err => {
         if (settled) return;
         settled = true;
+        stopPolling();
         clearTimeout(timer);
         reject(err);
       });
       child.on('close', code => {
         if (settled) return;
         settled = true;
+        stopPolling();
         clearTimeout(timer);
         const body = this.shellText(stdout, stderr);
         const elapsed = ((Date.now() - startedAt) / 1000).toFixed(1);
@@ -252,10 +394,16 @@ export class Executor {
     return path.relative(this.workspace, target);
   }
 
-  private async dispatch(step: TaskStep, lastOutput: string): Promise<{ output?: string; diff?: FileDiff }> {
-    const p = step.params ?? {};
-
-    switch (step.action) {
+  /**
+   * 执行一个动作。计划路径（run）和 agentic 循环（AgentRunner）都走这里，
+   * 两边只能有一份实现，否则工具清单和执行能力又会各写各的。
+   */
+  async dispatch(action: string, p: Record<string, any>, opts: RunOptions = {}): Promise<{ output?: string; diff?: FileDiff }> {
+    const lastOutput = opts.lastOutput ?? '';
+    if (opts.token?.aborted) throw new Error('已取消');
+    // 改动类动作先过一道放行，被拒就当工具失败，让模型自己决定下一步
+    if (opts.approve && isMutating(action, p)) await opts.approve(action, p);
+    switch (action) {
       case 'ai.answer': {
         // 纯回复：不动文件系统，把模型想说的话原样交给界面
         const text = typeof p.text === 'string' ? p.text.trim() : '';
@@ -295,8 +443,54 @@ export class Executor {
         const target = this.resolve(p.path);
         const res = this.files.readFile(target);
         if (!res.success) throw new Error(res.message);
-        const text = String(res.data);
-        return { output: text.length > 2000 ? text.slice(0, 2000) + '\n⋯ 已截断' : text };
+        let text = String(res.data);
+        // 大文件按行号取一段，模型才不用把整份读进来再自己找
+        const from = Math.max(Number(p.from) || 1, 1);
+        const to = Number(p.to) > 0 ? Number(p.to) : 0;
+        if (from > 1 || to) {
+          const lines = text.split('\n');
+          const head = lines.slice(from - 1, to || lines.length);
+          text = head.map((line, i) => `${from + i} | ${line}`).join('\n');
+        }
+        return { output: this.clipOut(text, 6000) };
+      }
+
+      case 'file.grep': {
+        const base = this.resolve(p.path ?? '.');
+        const limit = this.clampCount(p.maxMatches, 60, 300);
+        const raw = String(p.pattern ?? '');
+        if (!raw) throw new Error('file.grep 缺少 pattern');
+        // 按正则解不出来就退化成字面量匹配，别因为模型给了个带 ( 的串整步失败
+        let re: RegExp;
+        try {
+          re = new RegExp(raw, p.ignoreCase ? 'i' : '');
+          re.test('');
+        } catch {
+          re = new RegExp(raw.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), p.ignoreCase ? 'i' : '');
+        }
+        const nameRe = p.glob ? this.nameMatcher(String(p.glob)) : null;
+        const hits: string[] = [];
+        const skipped = new Set<string>();
+        this.walk(base, (entry, rel) => {
+          if (entry.kind === 'directory') {
+            // 目录本身不是搜索目标；只有噪音目录不下潜
+            if (this.SKIP_DIRS.has(entry.name)) {
+              skipped.add(entry.name);
+              return false;
+            }
+            return;
+          }
+          if (entry.size > 2_000_000) return;
+          if (nameRe && !nameRe.test(entry.name)) return;
+          const text = this.readTextFile(entry.full);
+          if (text === null) return;
+          text.split('\n').forEach((line, i) => {
+            if (!re.test(line)) return;
+            if (hits.length >= limit) throw COUNTED;
+            hits.push(`${rel}:${i + 1}: ${line.trim().slice(0, 200)}`);
+          });
+        });
+        return { output: this.findText(`内容搜索「${raw}」`, hits, skipped, limit) };
       }
 
       case 'file.write': {
@@ -379,7 +573,7 @@ export class Executor {
         if (!command) throw new Error('shell.run 缺少 command');
         const cwd = typeof p.cwd === 'string' && p.cwd.trim() ? this.resolve(p.cwd) : this.workspace;
         const timeoutMs = Math.min(Math.max(Number(p.timeoutMs) || 30_000, 1_000), 120_000);
-        return { output: await this.runShell(command, cwd, timeoutMs) };
+        return { output: await this.runShell(command, cwd, timeoutMs, opts.token) };
       }
 
       case 'browser.open':
@@ -456,7 +650,7 @@ export class Executor {
       }
 
       default:
-        throw new Error(`不支持的操作类型: ${step.action}`);
+        throw new Error(`不支持的操作类型: ${action}`);
     }
   }
 }

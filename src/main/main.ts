@@ -7,11 +7,12 @@ import * as path from 'path';
 import * as fs from 'fs';
 import { execFile } from 'child_process';
 import * as pty from 'node-pty';
-import { Planner } from '../core/planner';
+import { Planner, TaskPlan, TaskStep } from '../core/planner';
 import { MemoryManager } from '../core/memory';
 import { FileSkill } from '../skills/file-skill';
 import { AIEngine } from '../core/ai-engine';
-import { Executor } from '../core/executor';
+import { CancelToken, ExecutionSummary, Executor, RunOptions } from '../core/executor';
+import { AgentRunner, stepLabel } from '../core/agent';
 import { HistoryMessage, RequestImage, ThinkingLevel, estimateTokens, localDigest, normalizeThinking, snapContextWindow } from '../core/context';
 import { UsageStore } from './usage-store';
 
@@ -490,42 +491,112 @@ function normalizeImages(raw: unknown): RequestImage[] {
     }));
 }
 
-ipcMain.handle('task:plan', async (_e, request: unknown, workspaceId?: string, rawHistory?: unknown, rawImages?: unknown) => {
-  const workspace = findWorkspace(workspaceId);
-  const text = String(request ?? '').slice(0, 4000);
-  const history = normalizeHistory(rawHistory);
-  const images = normalizeImages(rawImages);
+/**
+ * 跑一轮需求：模型可用就走 agentic 循环（工具结果回灌给模型，它能连着看好几步），
+ * 没配模型时退回本地规则出计划再执行。两条路都往 task:event 推步骤，界面不用区分。
+ */
+const runningTokens = new Map<string, CancelToken>();
 
-  return planSerialized(workspace.path, async () => {
-    // 界面同一时刻只跑一个任务，所以「开始清零 + 结束取走」就能得到本轮规划用量
+/** 问答卡活在界面，等用户点选可能很久，放行确认按同一个超时算 */
+const APPROVAL_TIMEOUT_MS = 30 * 60_000;
+
+/** 关掉自动放行时，每个会改动东西的动作先问一句；答案不是「允许执行」就当作拒绝 */
+async function askApproval(action: string, p: Record<string, any>): Promise<void> {
+  const res = await browserCall('ask.user', {
+    question: `将要执行「${stepLabel(action, p)}」，这一步会改动东西，允许吗？`,
+    // echo:false —— 这个答案只回答「允不允许」，不是用户新提的一条需求
+    echo: false,
+    options: [
+      { label: '允许执行', detail: '马上执行这一步', recommended: true },
+      { label: '先不做', detail: '跳过，并把没放行这件事告诉模型' }
+    ]
+  }, APPROVAL_TIMEOUT_MS);
+  if (String(res?.answer ?? '').trim() !== '允许执行') {
+    throw new Error(`用户没有放行，${action} 没有执行`);
+  }
+}
+
+ipcMain.handle('task:run', async (_e, payload: any, workspaceId?: string) => {
+  const workspace = findWorkspace(workspaceId);
+  const text = String(payload?.request ?? '').slice(0, 4000);
+  const taskId = String(payload?.taskId ?? `task_${Date.now()}`);
+  const history = normalizeHistory(payload?.history);
+  const images = normalizeImages(payload?.images);
+  const token: CancelToken = { aborted: false };
+  runningTokens.set(taskId, token);
+
+  const job = planSerialized(workspace.path, async () => {
+    // 界面同一时刻只跑一个任务，所以「开始清零 + 结束取走」就是本轮的全部用量
     aiEngine.drainUsage();
     const startedAt = Date.now();
     const model = activeModelInfo();
-    const done = (payload: any) => {
-      const usage = aiEngine.drainUsage();
-      // 每条发出去的消息先落一行；执行阶段的用量由 task:execute-plan 按 id 续加
-      const usageRecordId = usageStore.record(text, model.id || '未配置模型', 'Woder', usage);
-      return { ...payload, model, planMs: Date.now() - startedAt, usage, usageRecordId };
+    const executor = executorFor(workspace);
+    const opts: RunOptions = { token, approve: payload?.autoApprove === false ? askApproval : undefined };
+    // 界面按 'ai' / 'fallback' 分别标「AI 执行」和「本地规则」，这里沿用同一套取值
+    let source: 'ai' | 'fallback' = 'ai';
+    let reason = '';
+
+    // 本地规则只能照着需求猜一份一次性计划，猜不出来就问一句，别硬跑
+    const runFallback = async () => {
+      source = 'fallback';
+      const plan: TaskPlan = { ...(await planner.planTask(text)), taskId };
+      return { steps: plan.steps, summary: await executor.run(plan, emit, opts), answer: '', rounds: 0 };
     };
 
+    let result: { steps: TaskStep[]; summary: ExecutionSummary; answer: string; rounds: number };
     if (!aiEngine.canPlan()) {
-      const plan = await planner.planTask(text);
-      return done({ success: true, data: { ...plan, request: text }, source: 'fallback' as const, reason: '' });
+      result = await runFallback();
+    } else {
+      try {
+        result = await new AgentRunner(executor, aiEngine)
+          .run({ taskId, request: text, history, images }, emit, opts);
+      } catch (error) {
+        // 整条 agentic 路都起不来（网关不认 tools 这类）才回落，界面标成「本地规则」
+        reason = String(error).replace(/^Error:\s*/, '').slice(0, 200);
+        result = await runFallback();
+      }
     }
 
-    try {
-      const plan = await aiEngine.enhanceTaskPlan(text, history, images);
-      return done({ success: true, data: { ...plan, request: text }, source: 'ai' as const });
-    } catch (aiError) {
-      const plan = await planner.planTask(text);
-      return done({
-        success: true,
-        data: { ...plan, request: text },
-        source: 'fallback' as const,
-        reason: String(aiError)
-      });
-    }
+    // 这里记真实路径。之前塞的是需求原话，会让提示里的「最近操作过的路径」
+    // 变成一堆历史需求，把模型往「凡事先列目录」上带偏。
+    result.steps
+      .flatMap(s => [s.params?.path, s.params?.from, s.params?.to])
+      .filter(v => typeof v === 'string' && v.trim())
+      .slice(0, 5)
+      .forEach(p => memoryManager.addRecentFile(String(p).slice(0, 120)));
+
+    const usage = aiEngine.drainUsage();
+    return {
+      success: true,
+      taskId,
+      source,
+      reason,
+      answer: result.answer,
+      steps: result.steps,
+      rounds: result.rounds,
+      model,
+      usage,
+      // 一条需求落一行用量，界面上的 token 数就从这里取
+      usageRecordId: usageStore.record(text, model.id || '未配置模型', 'Woder', usage),
+      runMs: Date.now() - startedAt,
+      summary: {
+        taskId: result.summary.taskId,
+        completed: result.summary.completed,
+        failed: result.summary.failed,
+        skipped: result.summary.skipped
+      }
+    };
   });
+
+  return job.finally(() => runningTokens.delete(taskId));
+});
+
+/** 停止正在跑的任务：翻掉取消令牌，正在等的命令会被终止，后面的步骤记为跳过 */
+ipcMain.handle('task:cancel', (_e, taskId: unknown) => {
+  const token = runningTokens.get(String(taskId ?? ''));
+  if (!token) return { success: false, message: '这个任务已经结束了' };
+  token.aborted = true;
+  return { success: true };
 });
 
 /**
@@ -589,33 +660,6 @@ ipcMain.handle('context:compact', async (_e, payload: any, workspaceId?: string)
 /**
  * 执行已确认的计划，过程通过 task:event 推送
  */
-ipcMain.handle('task:execute-plan', async (_e, plan: any, workspaceId?: string, usageRecordId?: unknown) => {
-  const steps = Array.isArray(plan?.steps)
-    ? plan.steps.filter((s: any) => s && typeof s.action === 'string')
-    : [];
-  if (steps.length === 0) return { success: false, message: '计划里没有可执行的步骤' };
-
-  const workspace = findWorkspace(workspaceId);
-  aiEngine.setWorkspace(workspace.path);
-  // 这里记真实路径。之前塞的是需求原话，会让规划提示里的「最近操作过的路径」
-  // 变成一堆历史需求，把模型往「凡事先列目录」上带偏。
-  const touched = steps
-    .flatMap((s: any) => [s?.params?.path, s?.params?.from, s?.params?.to])
-    .filter((v: any) => typeof v === 'string' && v.trim())
-    .map((v: any) => String(v).slice(0, 120))
-    .slice(0, 5);
-  touched.forEach((p: string) => memoryManager.addRecentFile(p));
-
-  aiEngine.drainUsage();
-  const startedAt = Date.now();
-  const summary = await executorFor(workspace).run({ ...plan, steps }, emit);
-  const usage = aiEngine.drainUsage();
-  // 执行阶段只有 ai.summarize 会调模型，没调过就是 0，界面按 0 显示；
-  // 有值则并回这条消息在 task:plan 落的那行用量
-  usageStore.addUsage(Number(usageRecordId) || 0, usage);
-  return { success: true, summary, runMs: Date.now() - startedAt, usage };
-});
-
 /**
  * 保存模型列表。渲染层每次提交整份列表：
  * - 带 id 的条目视为编辑，apiKey 留空表示沿用已保存的密钥

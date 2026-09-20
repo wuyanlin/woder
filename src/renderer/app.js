@@ -92,18 +92,6 @@ function fmtDuration(ms) {
 
 const fmtNum = n => Number(n ?? 0).toLocaleString('en-US');
 
-/** 两份用量相加；任何一份没上报就当没上报 */
-function addUsage(a, b) {
-  if (!b) return a ?? null;
-  if (!a) return b;
-  return {
-    prompt: (a.prompt ?? 0) + (b.prompt ?? 0),
-    completion: (a.completion ?? 0) + (b.completion ?? 0),
-    total: (a.total ?? 0) + (b.total ?? 0),
-    reported: !!(a.reported ?? b.reported)
-  };
-}
-
 /** 时间戳可能是毫秒数，也可能是 JSON 化后的 ISO 字符串 */
 function toMs(value) {
   if (typeof value === 'number' && value > 0) return value;
@@ -132,13 +120,13 @@ function userMetaText(turn) {
   return sentAt ? `发送于 ${fmtTime(sentAt)}` : '发送时间未知';
 }
 
-/** AI 回复下面那行：完成时间 · 耗时 · 规划 · token · 模型；没跑完就不显示 */
+/** AI 回复下面那行：完成时间 · 耗时 · 推理轮数 · token · 模型；没跑完就不显示 */
 function turnMetaText(turn) {
   const { finishedAt, elapsed } = turnTimes(turn);
   if (!finishedAt) return '';
   const bits = [`完成于 ${fmtTime(finishedAt)}`];
   if (elapsed != null) bits.push(`耗时 ${fmtDuration(elapsed)}`);
-  if (turn.planMs != null) bits.push(`规划 ${fmtDuration(turn.planMs)}`);
+  if (turn.rounds > 1) bits.push(`推理 ${turn.rounds} 轮`);
   if (turn.usage?.reported) bits.push(`${fmtNum(turn.usage.total)} token`);
   else if (turn.source === 'ai') bits.push('网关未上报 token');
   const model = turn.model?.label || turn.model?.id;
@@ -307,7 +295,7 @@ function serialize() {
       finishedAt: t.finishedAt ?? null,
       usage: t.usage ?? null,
       model: t.model ?? null,
-      planMs: t.planMs ?? null,
+      rounds: t.rounds ?? null,
       runMs: t.runMs ?? null
     }))
   }));
@@ -370,6 +358,7 @@ function callTarget(step) {
     case 'file.list':
     case 'file.discover':
     case 'file.classify': return String(p.path ?? '');
+    case 'file.grep': return [String(p.pattern ?? ''), p.path && p.path !== '.' ? `在 ${p.path}` : ''].filter(Boolean).join(' ');
     case 'wait': return `${p.ms ?? 300}ms`;
     default: return '';
   }
@@ -528,13 +517,32 @@ function buildRunTree(turn) {
   wrap.appendChild(list);
 
   turn._rt = {
-    wrap, cells, title, right, list,
+    turn, wrap, cells, title, right, chev, list,
     total: plan.steps.length,
     done: 0,
     failed: 0,
     addHead: node => wrap.after(node)
   };
+  // agentic 那一轮发出去时还没有步骤，空树先藏着，补进第一行再露出来
+  wrap.hidden = plan.steps.length === 0;
   return wrap;
+}
+
+/**
+ * agentic 循环的步骤是跑出来的：第一次见到这个 stepId 就照着事件补一行，
+ * 不然树会一直停在 0 步，用户看不见模型正在做什么。
+ */
+function appendRunStep(rt, ev) {
+  const step = { id: ev.stepId, name: ev.stepName, action: ev.tool, params: ev.input ?? {} };
+  rt.turn.plan.steps.push(step);
+  const cell = buildRunRow(rt.turn, step);
+  rt.cells.set(step.id, cell);
+  rt.wrap.hidden = false;
+  rt.list.appendChild(cell.row);
+  rt.total++;
+  const num = rt.chev.querySelector('.chev-num');
+  if (num) num.textContent = rt.total;
+  return cell;
 }
 
 
@@ -589,8 +597,12 @@ function ensureRowVisible(rt, row) {
 function applyEvent(turn, ev) {
   const rt = turn._rt;
   if (!rt) return;
-  const cell = rt.cells.get(ev.stepId);
-  if (!cell) return;
+  let cell = rt.cells.get(ev.stepId);
+  if (!cell) {
+    // 补平用的合成事件一定对得上已有行；真步骤没见过就当场补一行
+    if (!ev.stepId || ev.status === 'pending') return;
+    cell = appendRunStep(rt, ev);
+  }
 
   // 补平用的合成事件不带输出，别用它把已经显示出来的「执行结果」擦掉。
   // 真有结果的话优先用已有结果，只把状态换过去。
@@ -623,6 +635,9 @@ function applyEvent(turn, ev) {
     rt.replyEl.textContent = rt.replyEl.textContent
       ? `${rt.replyEl.textContent}\n\n${ev.output}`
       : ev.output;
+    // 答复已经在这了，上面那行「正在执行…」再留着就是废话
+    const head = turn._body.querySelector('.msg-text');
+    if (head && head.textContent.trim() === '正在执行…') head.hidden = true;
   }
 
   // 失败的步骤默认展开，错误不该要人多点一次才看得见
@@ -1166,6 +1181,8 @@ function buildTurn(turn) {
   const msg = el('div', 'msg');
   const body = el('div', 'msg-assistant');
   const note = el('div', 'msg-text', turn.note);
+  // 现在正文默认是空的：话由树底下那条「回答」说，这行只留给报错和补充说明
+  note.hidden = !turn.note;
   body.appendChild(note);
   msg.appendChild(body);
   frag.appendChild(msg);
@@ -1403,7 +1420,7 @@ function buildSessionRow(session) {
 function chipFor(session) {
   const last = session && session.turns[session.turns.length - 1];
   if (!last || !last.source) return ['就绪', ''];
-  return last.source === 'ai' ? ['AI 规划', 'ai'] : ['本地规则规划', 'fb'];
+  return last.source === 'ai' ? ['AI 执行', 'ai'] : ['本地规则', 'fb'];
 }
 
 function syncChip(session) {
@@ -2092,7 +2109,9 @@ let busyTimer = null;
 
 const showNote = (turn, text) => {
   const node = turn._body && turn._body.querySelector('.msg-text');
-  if (node) node.textContent = text;
+  if (!node) return;
+  node.textContent = text;
+  node.hidden = !text;
 };
 
 /** 主进程给的原因形如 "Error: AI 规划失败：Request timed out."，压成一行短句 */
@@ -2131,7 +2150,8 @@ function nudge() {
 }
 
 /**
- * 放弃等待当前任务：主进程里的请求还会跑完，但结果会被 runToken 丢弃
+ * 停止当前任务：让主进程翻掉这一轮的取消令牌，正在跑的命令会被终止，后面的步骤不再发起。
+ * 界面不等回执，挂着的步骤立刻落成「已跳过」，点了就该停下来。
  */
 function cancelRun() {
   if (!app.busy) return;
@@ -2140,15 +2160,14 @@ function cancelRun() {
   rejectAsk('你停止了这次任务');
   const turn = app.liveTurn;
   if (turn) {
-    // 停在「等待确认」时按停止，要把确认按钮收掉，否则点它会让废弃的 runToken 复活
-    turn._body?.querySelectorAll('.run-actions').forEach(node => node.remove());
+    woder.task.cancel(turn.plan?.taskId ?? '');
     // 还挂在执行中/待执行的步骤落成「已跳过」，不然结果被丢弃后转圈永不停
     turn._rt?.cells.forEach(cell => {
       if (cell.status === 'running' || cell.status === 'pending') {
         applyEvent(turn, { stepId: cell.step.id, tool: cell.step.action, status: 'skipped' });
       }
     });
-    turn.note = '已停止等待，可修改需求后重新发送。';
+    turn.note = '已停止，可修改需求后重新发送。';
     showNote(turn, turn.note);
   }
   finish(false);
@@ -2187,8 +2206,15 @@ async function submit(rawText, queuedImages) {
     request: text,
     attachments: images.length ? images : null,
     source: null,
-    note: '正在理解需求并生成执行计划…',
-    plan: null,
+    note: '',
+    // agentic 没有前置计划：taskId 界面先定下来，步骤等 task:event 回来一条条补进 steps
+    plan: {
+      taskId: `task_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`,
+      steps: [],
+      request: text,
+      status: 'running',
+      createdAt: new Date().toISOString()
+    },
     events: [],
     summary: null,
     // hover 元信息：发送时刻先记下来，完成时刻与用量在收尾时补
@@ -2196,7 +2222,6 @@ async function submit(rawText, queuedImages) {
     finishedAt: null,
     usage: null,
     model: null,
-    planMs: null,
     runMs: null,
     workspaceId: session.workspaceId
   };
@@ -2204,64 +2229,10 @@ async function submit(rawText, queuedImages) {
   app.liveTurn = turn;
 
   emptyNode().style.display = 'none';
+  // plan 已经在了，buildTurn 会顺手把执行树挂上（此刻 0 步，等事件补行）
   turnsHost().appendChild(buildTurn(turn));
-  scrollBottom();
-
-  let planned;
-  try {
-    planned = await woder.task.plan(text, session.workspaceId, history, images);
-  } catch (err) {
-    if (token !== runToken) return;
-    turn.note = '规划失败：' + ((err && err.message) || err);
-    showNote(turn, turn.note);
-    return finish();
-  }
-  // 已取消：丢掉这份迟到的计划
-  if (token !== runToken) return;
-  if (!planned || !planned.data || !Array.isArray(planned.data.steps) || planned.data.steps.length === 0) {
-    turn.note = '规划未返回有效计划：' + ((planned && (planned.reason || planned.message)) || '模型没给可执行步骤');
-    showNote(turn, turn.note);
-    return finish();
-  }
-
-  turn.source = planned.source;
-  turn.plan = planned.data;
-  turn.usage = planned.usage ?? null;
-  // 主进程已把这条消息落进用量库，执行阶段的 token 并回这行
-  turn.usageRecordId = planned.usageRecordId ?? null;
-  turn.model = planned.model ?? null;
-  turn.planMs = planned.planMs ?? null;
-  const stepCount = turn.plan.steps.length;
-  // 全是「只说话」的步骤时，别用「已生成 N 步执行计划」这种硬话术
-  const onlyAnswer = turn.plan.steps.every(s => s.action === 'ai.answer');
-  // 以问句收尾的计划：接下来是问答卡，别说「开始逐步执行」
-  const endsWithAsk = turn.plan.steps[stepCount - 1].action === 'ask.user';
-  turn.note = onlyAnswer
-    ? '这个不用动文件，我直接回答：'
-    : endsWithAsk
-      ? '先问你一句，答完接着做：'
-      : planned.source === 'ai'
-      ? `已生成 ${stepCount} 步执行计划，开始逐步执行：`
-      : (planned.reason
-        ? `模型没给可用计划（${cleanReason(planned.reason)}），已转本地规则生成 ${stepCount} 步计划：`
-        : `未接入模型，已用本地规则生成 ${stepCount} 步计划：`);
-
-  const body = turn._body;
-  body.querySelector('.msg-text').textContent = turn.note;
-
-  // 因为鉴权/网络失败才退回本地规则时，给一个直接能改的入口，而不是让用户自己去找设置
-  if (planned.source !== 'ai' && /API Key|HTTP 4|连不上|没返回|超时|校验/.test(String(planned.reason || ''))) {
-    const fix = el('button', 'link-btn', '模型不可用，去设置 ›');
-    fix.addEventListener('click', openSettings);
-    body.insertBefore(fix, body.children[1] ?? null);
-  }
-
-  body.appendChild(buildRunTree(turn));
-  renderProgress();   // 树一建好就该露进度，停在「等待确认」时也是 0/N
+  renderProgress();
   renderMonitor();
-
-  $('#engineChip').textContent = planned.source === 'ai' ? 'AI 规划' : '本地规则规划';
-  $('#engineChip').className = 'chip ' + (planned.source === 'ai' ? 'ai' : 'fb');
 
   if (session.title === '新的任务') {
     session.title = text.length > 24 ? text.slice(0, 24) + '…' : text;
@@ -2270,52 +2241,62 @@ async function submit(rawText, queuedImages) {
   }
   scrollBottom();
 
-  if (!app.autoApprove) {
-    clearInterval(busyTimer);
-    busyTimer = null;
-    $('#footStatus').textContent = '等待确认';
-    const actions = el('div', 'run-actions');
-    const confirmBtn = el('button', 'run-confirm', '确认执行');
-    const cancelBtn = el('button', 'run-cancel', '取消计划');
-    confirmBtn.addEventListener('click', () => {
-      if (token !== runToken) return;
-      actions.remove();
-      execute(turn, session, token);
-    });
-    cancelBtn.addEventListener('click', () => {
-      if (token !== runToken) return;
-      actions.remove();
-      turn.note = '已取消，未执行任何步骤。';
-      showNote(turn, turn.note);
-      finish();
-    });
-    actions.appendChild(confirmBtn);
-    actions.appendChild(cancelBtn);
-    body.appendChild(actions);
-    return;
-  }
-
-  await execute(turn, session, token);
+  await execute(turn, session, token, history, images);
 }
 
-async function execute(turn, session, token) {
-  setBusy(true, '执行中');
+async function execute(turn, session, token, history, images) {
+  setBusy(true, app.autoApprove ? '执行中' : '执行中 · 等你放行');
   let res;
   try {
-    res = await woder.task.executePlan(turn.plan, session.workspaceId, turn.usageRecordId ?? undefined);
+    res = await woder.task.run({
+      taskId: turn.plan.taskId,
+      request: turn.request,
+      history,
+      images,
+      autoApprove: app.autoApprove
+    }, session.workspaceId);
   } catch (err) {
     if (token !== runToken) return;
     turn.note = '执行中断：' + ((err && err.message) || err);
     showNote(turn, turn.note);
     return finish();
   }
-  if (token !== runToken) return;
+  if (token !== runToken) {
+    // 按了停止（或另起一轮）之后，这回执只用来补元信息：
+    // 这些 token 是真花掉的，用量面板里有它，这条消息上却不该一片空白
+    if (res && turn.usage == null) {
+      turn.source = res.source ?? 'fallback';
+      turn.model = res.model ?? null;
+      turn.rounds = res.rounds ?? 0;
+      turn.usage = res.usage ?? null;
+      turn.usageRecordId = res.usageRecordId ?? null;
+      turn.runMs = res.runMs ?? null;
+      refreshTurnMeta(turn);
+    }
+    return;
+  }
   if (!res || !res.summary) return finish();
 
-  turn.summary = res.summary;
+  turn.source = res.source ?? 'fallback';
+  turn.model = res.model ?? null;
+  turn.rounds = res.rounds ?? 0;
   turn.runMs = res.runMs ?? null;
-  // 执行阶段也可能调模型（ai.summarize），用量累加到本轮
-  turn.usage = addUsage(turn.usage, res.usage ?? null);
+  // 一轮一条用量：模型调用全在主进程那次 run 里发生，直接取回执
+  turn.usage = res.usage ?? null;
+  turn.usageRecordId = res.usageRecordId ?? null;
+  turn.summary = res.summary;
+  // 步骤是跑出来的，回执里那份才是全的；界面按事件补出来的行和它同 id，缺的才补
+  (res.steps ?? []).forEach(step => {
+    if (!turn.plan.steps.some(s => s.id === step.id)) turn.plan.steps.push(step);
+  });
+  syncChip(session);
+  if (res.reason) {
+    // agentic 整条路起不来才会回落，把原因留在正文，别让用户以为模型还在跑
+    showNote(turn, `模型没跑通（${cleanReason(res.reason)}），已转本地规则执行。`);
+    const fix = el('button', 'link-btn', '模型不可用，去设置 ›');
+    fix.addEventListener('click', openSettings);
+    turn._body?.appendChild(fix);
+  }
 
   // 汇总不再单独占一条：第一层那行已经写了总步数与失败次数。
   // 最后一条 task:event 可能比这个回执晚到，所以这里只把还挂着的步骤按汇总口径补平，
@@ -2713,7 +2694,8 @@ function renderContextCard() {
     '展示当前任务的上下文占用情况；压缩会摘要早期内容，需等待片刻并消耗少量 token。占用超过 85% 时，每轮结束会自动压缩一次。'));
 
   if (!stat) {
-    host.appendChild(el('p', 'ctx-note', '正在统计…'));
+    // 没有会话时压根没东西在算，报「正在统计」是骗人的
+    host.appendChild(el('p', 'ctx-note', active() ? '正在统计…' : '还没有会话，谈不上上下文占用。'));
     return;
   }
 
@@ -4225,7 +4207,11 @@ function closeAsk() {
   $('#composer').hidden = false;
 }
 
-/** 把问题画成问答卡并等回答：点选项 / 输入其他答案 resolve，取消则 reject */
+/**
+ * 把问题画成问答卡并等回答：点选项 / 输入其他答案 resolve，取消则 reject。
+ * echo=false 是放行确认这类「只给执行器看的回答」：答案回给主进程就当说完，
+ * 不该再冒充用户新发一条需求，否则会凭空多出一轮。
+ */
 function askUser(params) {
   if (askPending) return Promise.reject(new Error('界面上已经有一个问题在等回答'));
   const question = String(params?.question ?? '').trim();
@@ -4235,7 +4221,7 @@ function askUser(params) {
     .map(o => ({ label: String(o.label).trim(), detail: String(o.detail ?? ''), recommended: !!o.recommended }));
   askHi = Math.max(0, options.findIndex(o => o.recommended));
   return new Promise((resolve, reject) => {
-    askPending = { resolve, reject };
+    askPending = { resolve, reject, echo: params?.echo !== false };
     renderAskCard(question, options);
   });
 }
@@ -4247,7 +4233,7 @@ function answerAsk(text) {
   closeAsk();
   pending.resolve(value);
   // 答案排在队列最前面：用户等回答时可能还塞了别的话，那些要以这条为语境
-  queueMessage(value, null, true);
+  if (pending.echo !== false) queueMessage(value, null, true);
 }
 
 function rejectAsk(why) {

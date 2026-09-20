@@ -59,7 +59,7 @@ export class UsageStore {
     `);
   }
 
-  /** 消息发出、规划返回用量时落第一笔；执行阶段再靠 addUsage 把 run 的用量并进来 */
+  /** 一条需求跑完落一行：模型调用可能有好几轮，用量在回执里已经累好了 */
   record(text: string, model: string, product: string, usage: { prompt: number; completion: number; total: number; reported: boolean }): number {
     const info = this.db
       .prepare(`insert into usage_records (ts, text, model, product, prompt, completion, total, reported)
@@ -67,16 +67,6 @@ export class UsageStore {
       .run(Date.now(), text.slice(0, 400), model, product,
         usage.prompt | 0, usage.completion | 0, usage.total | 0, usage.reported ? 1 : 0);
     return Number(info.lastInsertRowid);
-  }
-
-  addUsage(id: number, usage: { prompt: number; completion: number; total: number; reported: boolean }): void {
-    if (!Number.isInteger(id) || id <= 0) return;
-    this.db
-      .prepare(`update usage_records
-                set prompt = prompt + ?, completion = completion + ?,
-                    total = total + ?, reported = max(reported, ?)
-                where id = ?`)
-      .run(usage.prompt | 0, usage.completion | 0, usage.total | 0, usage.reported ? 1 : 0, id);
   }
 
   private where(q: UsageQuery): { sql: string; args: unknown[] } {

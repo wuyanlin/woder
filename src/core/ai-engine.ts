@@ -3,9 +3,9 @@
  */
 
 import OpenAI from 'openai';
-import { TaskPlan, TaskStep } from './planner';
 import { MemoryManager } from './memory';
-import { ContextSection, HistoryMessage, RequestImage, ThinkingLevel, THINKING_BUDGET, statOf } from './context';
+import { ContextSection, HistoryMessage, ThinkingLevel, THINKING_BUDGET, statOf } from './context';
+import { openaiTools } from './tools';
 
 export interface AIConfig {
   apiKey: string;
@@ -38,6 +38,32 @@ export interface UsageReport {
 
 function emptyUsage(): UsageReport {
   return { prompt: 0, completion: 0, total: 0, reported: false };
+}
+
+/** 模型这轮想调的一个工具 */
+export interface ToolCall {
+  id: string;
+  fn: string;
+  args: Record<string, any>;
+}
+
+/** 一轮 agentic 请求的返回：想说的话 + 想调的工具，两者可以同时有 */
+export interface AgentTurn {
+  text: string;
+  toolCalls: ToolCall[];
+}
+
+/** 网关回的工具参数是个 JSON 字符串；截断或写成单引号时退化成空参，别让整轮崩掉 */
+function parseArgs(raw: unknown): Record<string, any> {
+  if (raw && typeof raw === 'object') return raw as Record<string, any>;
+  const text = String(raw ?? '').trim();
+  if (!text) return {};
+  try {
+    const parsed = JSON.parse(text);
+    return parsed && typeof parsed === 'object' ? parsed : { value: parsed };
+  } catch {
+    return {};
+  }
 }
 
 /** 从响应里累加用量：字段名在不同兼容网关上会飘，两种命名都认 */
@@ -162,6 +188,18 @@ export class AIEngine {
     messages: OpenAI.Chat.Completions.ChatCompletionMessageParam[],
     options: { temperature: number; maxTokens: number; timeoutMs?: number }
   ): Promise<string> {
+    const message = await this.rawMessage(messages, options);
+    return message?.content ?? '';
+  }
+
+  /**
+   * 发一次请求，拿回原始的 assistant message（含 tool_calls）。
+   * chat() 只要文本，agentic 循环要函数调用，所以底层统一成这个，别让两边各写一遍重试逻辑。
+   */
+  private async rawMessage(
+    messages: OpenAI.Chat.Completions.ChatCompletionMessageParam[],
+    options: { temperature: number; maxTokens: number; timeoutMs?: number; tools?: object[] }
+  ): Promise<any> {
     if (!this.openai) {
       throw new Error('未配置 API Key');
     }
@@ -177,6 +215,7 @@ export class AIEngine {
         messages,
         temperature: options.temperature,
         max_tokens: maxTokens,
+        ...(options.tools?.length ? { tools: options.tools, tool_choice: 'auto' } : {}),
         ...thinking
       } as OpenAI.Chat.Completions.ChatCompletionCreateParamsNonStreaming, requestOptions);
 
@@ -189,7 +228,7 @@ export class AIEngine {
     }
 
     this.usedTokens = usageOf(response, this.usedTokens);
-    return response.choices?.[0]?.message?.content ?? '';
+    return response.choices?.[0]?.message ?? {};
   }
 
   /**
@@ -205,126 +244,6 @@ export class AIEngine {
   /** 当前生效的 Model ID，界面用来标注这条回复是哪个模型给的 */
   activeModel(): string {
     return this.config.model ?? '';
-  }
-
-  /**
-   * 使用 LLM 增强任务规划
-   *
-   * history 是同一会话里前面几轮的问答（被压缩过的部分由界面合成一条摘要传来）。
-   * 带上它，「继续」「再改一下」这类需求才有依据；界面右下角的上下文占用也按这份消息算。
-   * images 是用户随需求附上的图片，走多模态 content，模型不支持视觉时会报错并降级到本地规则。
-   */
-  async enhanceTaskPlan(
-    userRequest: string,
-    history: HistoryMessage[] = [],
-    images: RequestImage[] = []
-  ): Promise<TaskPlan> {
-    if (!this.openai) {
-      throw new Error('未配置 API Key');
-    }
-
-    const note = images.length ? `\n\n本条需求附了 ${images.length} 张图片，请结合图片内容规划。` : '';
-    const brief = `需求：${userRequest}${note}\n\n请输出执行计划 JSON。`;
-    const userContent: OpenAI.Chat.Completions.ChatCompletionContentPart[] | string = images.length
-      ? [
-          { type: 'text', text: brief },
-          ...images.map(i => ({ type: 'image_url' as const, image_url: { url: i.dataUrl } }))
-        ]
-      : brief;
-
-    try {
-      const content = await this.chat(
-        [
-          { role: 'system', content: this.buildSystemPrompt() },
-          ...history.map(m => ({ role: m.role, content: m.content })),
-          { role: 'user', content: userContent }
-        ],
-        {
-          temperature: this.config.temperature || 0.3,
-          // max_tokens 不影响思考关闭后的耗时，留大是为了让 file.write 的完整内容不被截断
-          maxTokens: this.config.maxTokens || 6000
-        }
-      );
-
-      if (!content.trim()) {
-        throw new Error('模型只返回了思考内容，没有给出计划');
-      }
-
-      const plan = this.parseAIResponse(content);
-
-      // 保存用户偏好（学习）
-      this.learnFromRequest(userRequest);
-
-      return plan;
-    } catch (error) {
-      // 不在这里偷偷降级：抛给主进程，界面才能区分「AI 规划」和「本地规则规划」
-      console.error('AI planning error:', error);
-      throw new Error(`AI 规划失败：${describeError(error, this.config.timeoutMs ?? DEFAULT_TIMEOUT_MS)}`);
-    }
-  }
-  
-  /**
-   * 角色与判断规则。单独成块是为了上下文统计能把它和工具清单分开算。
-   */
-  private personaBlock(): string {
-    return `你是 Woder，一个运行在用户电脑上的智能工作助手。你的任务是把用户的自然语言需求拆解成一份可执行计划。
-
-第一步先判断需求属于哪一类，再决定要不要动文件：
-A. 打招呼、闲聊、问你是谁、问你能做什么、让你解释一个概念、问你看到的信息是什么意思 —— 这类只需要说话，不需要碰任何文件。只输出 1 步 ai.answer，把要回复的完整中文写在 params.text 里。绝对不要为了有事可做就去 file.list。
-B. 明确要对工作区里的文件、网页做操作或分析，或者要跑一条命令 —— 才用下面的 file.* / shell.run / ai.summarize / browser.* 动作，并且只做需求真正要求的那几步。
-C. 需求含糊、又必须动文件才能往下做（比如没说改哪个文件、目录下有同名候选、要删的东西没点名）—— 用 ask.user 问清楚，别猜着往下做。问题写成一句中文放进 question，可能的答案给成 2-4 个 options，实在需要自由输入（比如让用户给个文件名）就只留 1 个选项或者直接不给 options。`;
-  }
-
-  /** 执行器真正支持的 action，等价于其他产品里的「系统工具 / Skill」 */
-  private toolBlock(): string {
-    return `动作清单（action 只能取这些值）：
-- ai.answer      params: { text: string }                             把话直接回复给用户，不读写任何文件
-- ask.user       params: { question: string, options?: [{ label, detail?, recommended? }] }
-                     停下来问用户一个选择题：界面弹出问答卡，用户点选项或自己输入，答案文本就是这一步的输出。
-                     options 给 2-4 项，label 是几个字的短答案（要能直接当需求复述给后续步骤用），detail 说明选它会发生什么，
-                     recommended 最多一项标「推荐」。实在要用户自由发挥（比如文件名）就少给或不给选项。
-                     这一步必须是计划的最后一步，答完这一轮就结束了，用户的答案会作为下一条需求接着跑。
-- file.list      params: { path: string, recursive?: boolean }        列出目录内容
-- file.read      params: { path: string }                             读取文件
-- file.write     params: { path: string, content: string }            写入/覆盖文件，content 必须是可直接落盘的完整内容
-- file.append    params: { path: string, content: string }            追加内容到文件末尾
-- file.mkdir     params: { path: string }                             创建目录
-- file.move      params: { from: string, to: string }                 移动或重命名
-- file.delete    params: { path: string }                             删除文件
-- file.classify  params: { path: string }                             按扩展名统计分组
-- ai.summarize   params: { path?: string, text?: string, maxLength?: number }  总结文本或文件；两个都不给时总结上一步的输出
-- shell.run      params: { command: string, cwd?: string, timeoutMs?: number }  在工作区里执行一条终端命令，默认 30 秒超时、最长 120 秒
-- browser.open   params: { url: string }                              在右侧内置浏览器里打开网页，只负责打开
-- browser.read   params: { maxLength?: number }                       读当前页面：标题、正文、带序号的可点击元素清单
-- browser.click  params: { index?: number, selector?: string, text?: string }  点击页面元素，优先用 browser.read 返回的 index
-- browser.type   params: { text: string, index?: number, selector?: string, submit?: boolean }  往输入框填内容，submit 为 true 时顺便回车
-- browser.extract params: { selectors: string[] }                     按 CSS 选择器抓页面文本
-- browser.screenshot params: { path?: string }                        截取当前页面，存到工作区 screenshots/ 下
-- browser.close  params: {}                                          关闭内置浏览器所有标签页
-- wait           params: { ms: number }                               等待`;
-  }
-
-  private ruleBlock(): string {
-    return `硬性规则：
-1. path 一律使用相对于工作区根目录的相对路径，不要使用绝对路径，不要使用 .. 越界。
-2. 需要读取结果再决定下一步时，用 dependsOn 声明依赖，被依赖步骤的 id 必须真实存在。
-3. file.write 的 content 必须写全，不要用占位符或省略号。
-4. 步骤数量控制在 1-8 个，能一步做完就不要拆多步；说话能解决的只做 1 步 ai.answer。
-5. 回复给用户的文字一律用中文。
-6. shell.run 只在用户明确要跑命令时使用，command 原样可执行、不要包 sudo，也不要用来做 rm -rf 这类破坏性操作；cwd 用相对路径。
-7. 网页操作全部走内置浏览器：先 browser.open，再 browser.read，之后才能按 read 返回的序号 browser.click / browser.type。页面点过、跳转过就要重新 read，别沿用旧序号。
-8. 只输出 JSON，不要任何解释文字、不要 markdown 代码块。
-9. ask.user 只能放在最后一步：你拿不到答案就没法写后面的具体参数。要问就先说话再问（前面可以放 ai.answer 说明为什么要问）。
-
-例子：
-需求「你好」→ {"taskId":"t1","steps":[{"id":"s1","name":"打招呼并说明能做什么","action":"ai.answer","params":{"text":"你好，我可以帮你读写和整理工作区里的文件、总结文本、用内置浏览器打开网页看内容。直接说你想做什么就行。"}}],"status":"pending","createdAt":"2026-01-01T00:00:00.000Z"}
-需求「把内容改成 456」且目录下同时有 123.txt 和 123.md → {"taskId":"t5","steps":[{"id":"s1","name":"说明为什么要问","action":"ai.answer","params":{"text":"目录下同时存在 123.txt 和 123.md，需要你确认改哪个。"}},{"id":"s2","name":"确认改哪个文件","action":"ask.user","params":{"question":"要把哪个文件的内容改成 456?","options":[{"label":"123.txt","detail":"修改 123.txt","recommended":true},{"label":"123.md","detail":"修改 123.md"},{"label":"两个都改","detail":"两个文件内容都改成 456"}]}}],"status":"pending","createdAt":"2026-01-01T00:00:00.000Z"}
-需求「列出 src 目录」→ {"taskId":"t2","steps":[{"id":"s1","name":"列出 src 目录","action":"file.list","params":{"path":"src"}}],"status":"pending","createdAt":"2026-01-01T00:00:00.000Z"}
-需求「跑一下 git status」→ {"taskId":"t3","steps":[{"id":"s1","name":"查看工作区改动","action":"shell.run","params":{"command":"git status --short"}}],"status":"pending","createdAt":"2026-01-01T00:00:00.000Z"}
-需求「打开 https://example.com 看看讲了什么」→ {"taskId":"t4","steps":[{"id":"s1","name":"打开 example.com","action":"browser.open","params":{"url":"https://example.com"}},{"id":"s2","name":"读取页面内容","action":"browser.read","params":{},"dependsOn":["s1"]},{"id":"s3","name":"总结页面讲了什么","action":"ai.summarize","params":{"maxLength":300},"dependsOn":["s2"]}],"status":"pending","createdAt":"2026-01-01T00:00:00.000Z"}
-
-输出结构：
-{"taskId":"字符串","steps":[{"id":"字符串","name":"简短中文名","action":"上述动作之一","params":{},"dependsOn":["已存在的步骤id"]}],"status":"pending","createdAt":"ISO时间"}`;
   }
 
   /** 记忆与工作区：跨会话攒下来的东西，占用记在「记忆」这一栏 */
@@ -343,25 +262,92 @@ C. 需求含糊、又必须动文件才能往下做（比如没说改哪个文�
   }
 
   /**
-   * 构建系统提示词
+   * agentic 循环的系统提示词：不再要求模型「先出一份计划」，而是告诉它怎么一轮一轮干活。
+   * 工具本身由 function schema 给，不在提示词里重复一遍。
    */
-  private buildSystemPrompt(): string {
-    return [this.personaBlock(), this.toolBlock(), this.ruleBlock(), this.memoryBlock()].join('\n\n');
+  private agentPersonaBlock(): string {
+    return `你是 Woder，一个运行在用户电脑上的工作助手。你像其他 agentic 工具那样干活：一轮一轮地调用工具、看结果、再决定下一步，直到需求真正做完，然后用中文说一句结论。
+
+判断顺序：
+- 打招呼、闲聊、问你是谁、问一个概念、让你解释看到的信息 —— 不调用任何工具，直接回一句中文就结束这一轮。
+- 需求要对文件、网页、命令做点什么 —— 直接调用工具去做，不要反过来问用户「要不要我列一下目录」。
+- 不知道工作区里有什么、某个文件在哪 —— 用 shell_run 跑 find / dir，或 file_grep / file_list 去看清楚再动手，别凭印象猜路径。
+- 需求含糊、必须动文件才能往下做（没说要改哪个文件、要删的东西没点名）—— 用 ask_user 问一句，别猜着做。`;
   }
 
   /**
-   * 一次规划请求的分区占用。界面右下角那个百分比和明细卡片都读这里，
+   * shell_run 起的是系统默认 shell（POSIX 下 /bin/sh，Windows 下 cmd.exe），
+   * 命令语法两边不通。查找文件现在全靠 shell，不告诉模型自己在跟谁说话，它就会端错语法。
+   */
+  private shellBlock(): string {
+    const win = process.platform === 'win32';
+    return `运行环境与怎么找文件：
+- 你现在在 ${win ? 'Windows' : process.platform === 'darwin' ? 'macOS' : 'Linux'} 上，shell_run 用 ${win ? 'cmd.exe' : '/bin/sh'}，工作目录已经是工作区根，命令里写相对路径。
+- 想知道「有什么文件」「某个文件在哪」就用 shell_run 跑系统命令，没有别的查找工具：${win
+      ? 'dir /s /b *util*、where /r . *.ts、type 文件名'
+      : "find . -iname '*util*'、ls -la、find . -name '*.ts' -not -path './node_modules/*'"}。
+- 递归查找记得排除 node_modules、.git、dist 这些大目录（find 用 -not -path，或加 | head 限制条数），不然结果会被截断，反而看不清。`;
+  }
+
+  private agentRuleBlock(): string {
+    return `硬性规则：
+1. path 一律相对于工作区根目录，不要用绝对路径，不要用 .. 越界。
+2. 改文件之前必须先 file_read 看过原文；file_write 的 content 必须是完整的最终内容，不能留占位符或省略号。
+3. 互不依赖的查询可以在同一轮里一起调用，省下来回。
+4. 网页操作全走内置浏览器：browser_open 之后先 browser_read 拿带序号的元素清单，再 click / type；页面点过、跳转过就要重新 read，别沿用旧序号。
+5. shell_run 就是普通的命令行：查询类的（find、ls、dir、grep 这些）直接跑，会改动东西的命令要先经用户放行；命令原样可执行、不要包 sudo，也不要跑 rm -rf 这类破坏性操作。
+6. 一次任务最多推进 12 轮，快到上限时先把结论说清楚，别在最后一轮开个新查询。
+7. 给用户看的文字一律中文、简洁，不要复述工具输出的大段内容。`;
+  }
+
+  /** 每轮都一样的那部分系统提示。记忆单独一块，上下文统计要分开记账 */
+  private agentCorePrompt(): string {
+    return [this.agentPersonaBlock(), this.agentRuleBlock(), this.shellBlock()].join('\n\n');
+  }
+
+  /** agentic 循环真正要发的系统消息。AgentRunner 和上下文统计都读它，保证两边是同一份。 */
+  agentSystemPrompt(): string {
+    return [this.agentCorePrompt(), this.memoryBlock()].join('\n\n');
+  }
+
+  /**
+   * 走一轮 agentic 请求：把当前消息和工具清单发出去，拿回模型这轮想说的话和想调的工具。
+   * 不在这兜底降级——出错了由 AgentRunner 决定是收尾还是报错。
+   */
+  async agentTurn(messages: OpenAI.Chat.Completions.ChatCompletionMessageParam[]): Promise<AgentTurn> {
+    if (!this.openai) {
+      throw new Error('未配置 API Key');
+    }
+    const message = await this.rawMessage(messages, {
+      temperature: this.config.temperature || 0.3,
+      maxTokens: this.config.maxTokens || 4000,
+      // 一次工具调用要写完整文件内容，比规划一份计划慢得多
+      timeoutMs: 90_000,
+      tools: openaiTools()
+    });
+
+    const calls: ToolCall[] = (message.tool_calls ?? []).map((c: any) => ({
+      id: String(c?.id ?? ''),
+      fn: String(c?.function?.name ?? ''),
+      args: parseArgs(c?.function?.arguments)
+    }));
+
+    return { text: String(message.content ?? '').trim(), toolCalls: calls };
+  }
+
+  /**
+   * 一轮请求的分区占用。界面右下角那个百分比和明细卡片都读这里，
    * 保证「显示给用户的」和「真要发给模型的」是同一份内容。
    */
   contextSections(history: HistoryMessage[], request: string): ContextSection[] {
     const messages = [...history.map(m => m.content), `需求：${request ?? ''}`].join('\n');
     return [
-      { key: 'system', label: '系统提示词', text: `${this.personaBlock()}\n\n${this.ruleBlock()}` },
-      { key: 'tools', label: '系统工具', text: this.toolBlock() },
+      { key: 'system', label: '系统提示词', text: this.agentCorePrompt() },
+      { key: 'tools', label: '系统工具', text: JSON.stringify(openaiTools()) },
       { key: 'memory', label: '记忆', text: this.memoryBlock() },
       { key: 'messages', label: '消息', text: messages },
       // 输出不是文本，按 max_tokens 直接记账
-      { key: 'output', label: '输出预留', text: '', tokens: this.config.maxTokens || 6000 }
+      { key: 'output', label: '输出预留', text: '', tokens: this.config.maxTokens || 4000 }
     ];
   }
 
@@ -393,63 +379,9 @@ C. 需求含糊、又必须动文件才能往下做（比如没说改哪个文�
   }
   
   /**
-   * 解析 AI 响应：容忍 markdown、前后解释文字，并补齐执行器需要的字段
+   * 从请求中学习用户习惯。规划路径和 agentic 路径都要调，所以是公开的。
    */
-  private parseAIResponse(content: string): TaskPlan {
-    const start = content.indexOf('{');
-    const end = content.lastIndexOf('}');
-    if (start < 0 || end <= start) {
-      throw new Error('响应里没有 JSON 计划');
-    }
-
-    let plan: any;
-    try {
-      plan = JSON.parse(content.slice(start, end + 1));
-    } catch {
-      throw new Error('计划 JSON 不完整，可能被输出长度截断');
-    }
-
-    const rawSteps: any[] = Array.isArray(plan.steps) ? plan.steps : [];
-    const usedIds = new Set<string>();
-    const steps: TaskStep[] = rawSteps
-      .filter(s => s && typeof s.action === 'string')
-      .map((s, i) => {
-        let id = typeof s.id === 'string' && s.id ? s.id : `step_${i + 1}`;
-        // 模型偶尔会给出重复 id，执行器按 id 记录状态会串位
-        while (usedIds.has(id)) id = `${id}_b`;
-        usedIds.add(id);
-
-        const params = typeof s.params === 'object' && s.params ? s.params : {};
-        // ai.answer 的字段名模型会飘（answer/message/reply/content），统一成 text
-        if (s.action === 'ai.answer' && typeof params.text !== 'string') {
-          params.text = params.answer ?? params.message ?? params.reply ?? params.content ?? params.result ?? '';
-        }
-
-        return {
-          id,
-          name: typeof s.name === 'string' && s.name ? s.name : `步骤 ${i + 1}`,
-          action: s.action,
-          params,
-          ...(Array.isArray(s.dependsOn) ? { dependsOn: s.dependsOn.filter((d: any) => typeof d === 'string') } : {})
-        };
-      });
-
-    if (steps.length === 0) {
-      throw new Error('模型没有给出可执行步骤');
-    }
-
-    return {
-      taskId: typeof plan.taskId === 'string' && plan.taskId ? plan.taskId : this.generateTaskId(),
-      steps,
-      status: 'pending',
-      createdAt: plan.createdAt ? new Date(plan.createdAt) : new Date()
-    };
-  }
-
-  /**
-   * 从请求中学习用户习惯
-   */
-  private learnFromRequest(request: string): void {
+  learnFromRequest(request: string): void {
     // 简单的模式识别
     if (request.includes('整理') || request.includes('organize')) {
       this.memoryManager.learnBehavior('file_organization', 1);
@@ -462,14 +394,6 @@ C. 需求含糊、又必须动文件才能往下做（比如没说改哪个文�
     }
   }
 
-  
-  /**
-   * 生成任务 ID
-   */
-  private generateTaskId(): string {
-    return `task_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-  }
-  
   /**
    * 获取对话历史（用于多轮对话）
    */
