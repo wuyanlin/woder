@@ -93,6 +93,9 @@ jobs:
       - name: 自检原生产物 ABI
         shell: bash
         run: npx electron scripts/abi-check.js
+      - name: 编译
+        shell: bash
+        run: npm run compile
       # 这里不走 npm run build:win：那个脚本是给 mac 交叉编译准备的（要把本机
       # darwin 的 sqlite 二进制临时换成 win32 的），在 win runner 上装到的本来就是
       # win32-x64，而且脚本里的 spawnSync('npx') 在 Windows 上起不来
