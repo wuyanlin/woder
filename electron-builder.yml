@@ -1,0 +1,45 @@
+appId: com.woder.desktop
+productName: Woder
+copyright: Copyright © 2026 Woder
+
+# tsc 的产物就放在 dist/，electron-builder 默认的 dist/ 会跟它撞车，输出换到 release/
+directories:
+  output: release
+  buildResources: build
+
+# 默认会按目标平台重新编译原生依赖：better-sqlite3 在 mac 上交叉编译不了，
+# 而且这里的规矩是必须锁 Electron 28 / ABI 119 的预编译产物，所以直接关掉
+npmRebuild: false
+
+files:
+  - dist/**/*
+  - package.json
+  # native/ 只是给 scripts/build-win.js 换二进制用的原料，不必进包
+  - '!native/**'
+
+# .node 加载不了 asar 里的文件；node-pty 在 Windows 上还要 winpty.dll / winpty-agent.exe 落在真实路径上
+asarUnpack:
+  - '**/*.node'
+  - '**/prebuilds/**'
+
+win:
+  target:
+    - target: nsis
+      arch: [x64]
+
+mac:
+  category: public.app-category.developer-tools
+  # 这台机器是 Apple Silicon，跟 win 那份一样只出当前架构；x64 得另外备一颗 darwin-x64 的 sqlite 二进制
+  target:
+    - target: dmg
+      arch: [arm64]
+
+dmg:
+  artifactName: ${productName}-${version}-${arch}.${ext}
+
+nsis:
+  oneClick: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: always
+  shortcutName: Woder
+  artifactName: ${productName}-Setup-${version}-${arch}.${ext}

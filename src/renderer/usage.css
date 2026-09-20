@@ -1,0 +1,164 @@
+/* ===== Woder · 用量管理页（独立窗口，配色与主界面同一套变量） ===== */
+
+:root {
+  --bg: #ffffff;
+  --bg-sidebar: #f4f4f6;
+  --bg-panel: #fbfbfc;
+  --bg-hover: #ececef;
+  --bg-active: #e4e4ea;
+  --border: #e6e6ea;
+  --border-soft: #eeeeee;
+  --text: #17181c;
+  --text-2: #62666f;
+  --text-3: #9a9ea8;
+  --accent: #5b5bd6;
+  --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+}
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+/* 用量页现在是主窗口里的全屏弹出层：盖住 .app，z-index 压过 win-toggles */
+.usage-overlay {
+  position: fixed; inset: 0; z-index: 40;
+  background: var(--bg);
+}
+.usage-overlay[hidden] { display: none; }
+/* 用量层打开时收掉右上角布局开关，它们只属于主界面 */
+body.usage-open .win-toggles { display: none; }
+
+.u-app { display: flex; height: 100%; }
+
+.drag.strip { -webkit-app-region: drag; height: 38px; flex: none; }
+
+/* ---------------- 左侧菜单 ---------------- */
+
+.u-side {
+  width: 232px; flex: none; display: flex; flex-direction: column;
+  background: var(--bg-sidebar); border-right: 1px solid var(--border);
+}
+
+.u-back {
+  display: flex; align-items: center; gap: 7px;
+  margin: 2px 14px 14px; padding: 7px 9px; width: fit-content;
+  border: 0; border-radius: 8px; background: none; cursor: pointer;
+  font-size: 13.5px; color: var(--text); font-family: inherit;
+}
+.u-back:hover { background: var(--bg-hover); }
+.u-back .i { width: 15px; height: 15px; }
+
+.u-group {
+  padding: 10px 16px 6px; font-size: 11.5px; color: var(--text-3);
+}
+
+.u-nav { padding: 0 10px; }
+
+.u-item {
+  display: flex; align-items: center; gap: 9px; width: 100%;
+  padding: 8px 10px; border: 0; border-radius: 8px;
+  background: none; cursor: pointer; text-align: left;
+  font-size: 13.5px; color: var(--text); font-family: inherit;
+}
+.u-item .i { width: 15px; height: 15px; stroke: currentColor; fill: none; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
+.u-item:hover { background: var(--bg-hover); }
+.u-item.active { background: var(--bg-active); font-weight: 550; }
+
+/* ---------------- 右侧内容 ---------------- */
+
+.u-main {
+  flex: 1; min-width: 0; display: flex; flex-direction: column;
+  padding: 44px 34px 24px; overflow-y: auto; position: relative;
+}
+
+.u-stat-card {
+  border: 1px solid var(--border); border-radius: 14px;
+  background: var(--bg-panel); padding: 18px 20px 16px;
+}
+
+.u-stat-label { display: flex; align-items: center; gap: 6px; font-size: 13px; color: var(--text-2); }
+
+.u-info {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 14px; height: 14px; border-radius: 50%;
+  border: 1px solid var(--text-3); color: var(--text-3);
+  font-size: 9.5px; font-style: normal; cursor: default;
+}
+
+.u-stat-big { display: flex; align-items: center; gap: 10px; margin: 8px 0 16px; }
+.u-stat-big .spark { width: 22px; height: 22px; fill: var(--text); }
+.u-stat-big b { font-size: 30px; font-weight: 650; letter-spacing: -0.5px; font-variant-numeric: tabular-nums; }
+
+.u-stat-sub { display: flex; gap: 14px; }
+.u-sub {
+  flex: 1; border: 1px solid var(--border-soft); border-radius: 11px;
+  background: var(--bg-sidebar); padding: 12px 14px;
+  display: flex; flex-direction: column; gap: 8px;
+}
+.u-sub-k { font-size: 12.5px; color: var(--text-2); }
+.u-sub-v { font-size: 19px; font-weight: 600; font-variant-numeric: tabular-nums; }
+
+.u-title { font-size: 16px; font-weight: 600; margin: 26px 0 12px; }
+
+.u-filter { display: flex; align-items: center; gap: 12px; margin-bottom: 14px; }
+
+.u-seg {
+  display: flex; padding: 3px; border-radius: 9px;
+  background: var(--bg-sidebar); border: 1px solid var(--border-soft);
+}
+.u-seg button {
+  border: 0; background: none; cursor: pointer; font-family: inherit;
+  font-size: 12.5px; color: var(--text-2); padding: 5px 13px; border-radius: 7px;
+}
+.u-seg button:hover { color: var(--text); }
+.u-seg button.active { background: #fff; color: var(--text); font-weight: 550; box-shadow: 0 1px 3px rgba(0,0,0,.08); }
+
+.u-dates { display: flex; align-items: center; gap: 6px; }
+.u-dates input {
+  border: 1px solid var(--border); border-radius: 8px; background: #fff;
+  font-family: inherit; font-size: 12.5px; color: var(--text);
+  padding: 5px 8px;
+}
+.u-sep { color: var(--text-3); }
+
+.u-spacer { flex: 1; }
+
+#modelSel {
+  border: 1px solid var(--border); border-radius: 8px; background: #fff;
+  font-family: inherit; font-size: 12.5px; color: var(--text);
+  padding: 6px 9px; max-width: 220px;
+}
+
+/* ---------------- 明细表 ---------------- */
+
+.u-table-wrap {
+  border: 1px solid var(--border); border-radius: 12px;
+  background: #fff; overflow: hidden;
+}
+
+.u-table { width: 100%; border-collapse: collapse; }
+
+.u-table th {
+  text-align: left; font-weight: 500; font-size: 12.5px; color: var(--text-2);
+  background: var(--bg-sidebar); padding: 11px 16px;
+  border-bottom: 1px solid var(--border);
+}
+.u-table th.c-num, .u-table td.c-num { text-align: right; }
+.u-table th.c-time { width: 148px; }
+.u-table th.c-model { width: 150px; }
+.u-table th.c-product { width: 92px; }
+/* 输入/输出/合计三列并排，窄一点才放得下 */
+.u-table th.c-num { width: 96px; padding-right: 12px; }
+
+.u-table td {
+  padding: 13px 16px; font-size: 13px; border-bottom: 1px solid var(--border-soft);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.u-table td.c-num { padding-right: 12px; }
+.u-table tr:last-child td { border-bottom: 0; }
+.u-table tbody tr:hover { background: var(--bg-panel); }
+
+.u-table td.c-time { color: var(--text-2); font-family: var(--mono); font-size: 12px; }
+.u-table td.c-num { font-weight: 550; font-variant-numeric: tabular-nums; }
+.u-table td.c-total { font-weight: 650; }
+.u-table td.zero { color: var(--text-3); font-weight: 400; }
+
+.u-empty { padding: 34px 0; text-align: center; color: var(--text-3); font-size: 13px; }

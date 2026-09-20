@@ -1,0 +1,526 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; frame-src http: https: data: blob:">
+  <title>Woder</title>
+  <link rel="stylesheet" href="styles.css">
+  <link rel="stylesheet" href="usage.css">
+  <link rel="stylesheet" href="vendor/xterm.css">
+</head>
+<body>
+<div class="app">
+
+  <!-- ============ 左侧导航 ============ -->
+  <aside class="sidebar">
+    <div class="drag strip"></div>
+
+    <div class="sidebar-top">
+      <button class="mode-tab active">
+        <svg viewBox="0 0 24 24" class="i"><path d="M9 6 4 12l5 6M15 6l5 6-5 6"/></svg>
+        编程
+      </button>
+      <button class="mode-tab" title="更多模式">
+        <svg viewBox="0 0 24 24" class="i"><path d="M12 3l1.8 4.9L19 9.5l-4.2 2.6L15 17l-3-2.7L9 17l.2-4.9L5 9.5l5.2-1.6z"/></svg>
+      </button>
+    </div>
+
+    <nav class="nav">
+      <button class="nav-item" id="btnNewTask">
+        <svg viewBox="0 0 24 24" class="i"><circle cx="12" cy="12" r="9"/><path d="M12 8v8M8 12h8"/></svg>
+        新的任务
+      </button>
+      <button class="nav-item">
+        <svg viewBox="0 0 24 24" class="i"><circle cx="11" cy="11" r="6"/><path d="M20 20l-4.5-4.5"/></svg>
+        搜索
+      </button>
+    </nav>
+
+    <div class="side-label">
+      工作区
+      <button class="label-add" id="btnAddWs" title="添加工作区">
+        <svg viewBox="0 0 24 24" class="i"><path d="M12 6v12M6 12h12"/></svg>
+      </button>
+    </div>
+    <div class="ws-list" id="workspaces"></div>
+
+    <div class="side-spacer"></div>
+
+    <nav class="nav bottom">
+      <button class="nav-item"><svg viewBox="0 0 24 24" class="i"><path d="M10 4h4v3a2 2 0 004 1v4h-3a2 2 0 00-4 0h-3V9a2 2 0 004-1z"/><path d="M10 16v4h4v-4"/></svg>扩展</button>
+    </nav>
+
+    <div class="account">
+      <div class="avatar">W</div>
+      <div class="account-meta">
+        <div class="account-name" id="accountName">本地工作区</div>
+        <div class="account-sub" id="accountPath">—</div>
+      </div>
+      <button class="icon-btn" id="btnUsage" title="查看我的用量">
+        <svg viewBox="0 0 24 24" class="i"><path d="M5 20V10M12 20V4M19 20v-7"/></svg>
+      </button>
+      <button class="icon-btn" id="btnSettings" title="AI 配置">
+        <svg viewBox="0 0 24 24" class="i"><circle cx="12" cy="12" r="3"/><path d="M12 3v2.5M12 18.5V21M4.5 7.5l2 1.2M17.5 15.3l2 1.2M4.5 16.5l2-1.2M17.5 8.7l2-1.2"/></svg>
+      </button>
+    </div>
+  </aside>
+
+  <!-- ============ 中间对话流 ============ -->
+  <main class="chat">
+    <header class="chat-top">
+      <div class="drag strip slim"></div>
+      <div class="chat-top-row">
+        <div class="session-title" id="sessionTitle">新的任务</div>
+        <div class="chat-top-actions">
+          <span class="chip" id="engineChip" title="当前规划来源">待配置</span>
+          <button class="icon-btn layout-btn" id="btnMonitor" title="任务监控" aria-pressed="false">
+            <svg viewBox="0 0 24 24" class="i"><rect x="3.5" y="4.5" width="17" height="15" rx="2.5"/><path d="M7.5 9h9M7.5 12.5h9M7.5 16h5.5"/></svg>
+          </button>
+        </div>
+      </div>
+    </header>
+
+    <div class="stream" id="stream">
+      <div class="empty" id="empty">
+        <div class="empty-mark">
+          <svg viewBox="0 0 24 24" class="i"><path d="M9 6 4 12l5 6M15 6l5 6-5 6"/></svg>
+        </div>
+        <h2>你说需求，我来交付</h2>
+        <p>描述一个任务，Woder 会生成计划列表并逐步执行，改动实时出现在右侧审阅面板。</p>
+        <div class="samples">
+          <button class="sample" data-fill="整理当前工作区的文件，按类型统计并生成一份 Markdown 报告">
+            <span class="sample-t">整理工作区并出报告</span>
+            <span class="sample-d">盘点 → 分类 → 写入报告</span>
+          </button>
+          <button class="sample" data-fill="读取 README.md 并生成一份 300 字以内的摘要">
+            <span class="sample-t">总结指定文件</span>
+            <span class="sample-d">读取 → AI 摘要</span>
+          </button>
+          <button class="sample" data-fill="在 reports 目录下创建一份本周工作周报">
+            <span class="sample-t">创建周报文档</span>
+            <span class="sample-d">建目录 → 写文件</span>
+          </button>
+        </div>
+      </div>
+      <div id="turns"></div>
+    </div>
+
+    <div class="composer-wrap">
+      <!-- 执行中的进度浮标：步数 + 已改文件，悬停弹出步骤清单与改动列表 -->
+      <div class="run-progress" id="runProgress" hidden>
+        <div class="rp-pop" id="rpPop" hidden></div>
+        <!-- 浮标本体是常驻节点，JS 只改里面的文字：整块重建会把鼠标底下那个节点换掉，
+             浏览器当成指针离开，悬停弹层刚开就被收走 -->
+        <button class="rp-chip" id="rpChip" type="button" title="悬停查看执行步骤与改动文件">
+          <span class="rp-zone" data-zone="steps">
+            <svg viewBox="0 0 24 24" class="rp-spin"><path d="M12 3.6a8.4 8.4 0 11-8.4 8.4"/></svg>
+            <span class="rp-steps" id="rpSteps">步骤 0 / 0</span>
+          </span>
+          <span class="rp-zone" data-zone="files" id="rpFilesZone" hidden>
+            <span class="rp-files" id="rpFiles"></span>
+            <span class="rp-count"><b class="add" id="rpAdd">+0</b><b class="del" id="rpDel">−0</b></span>
+          </span>
+        </button>
+      </div>
+      <!-- 任务跑着的时候发出去的需求先排在这里，本轮结束后按顺序自动发 -->
+      <div class="msg-queue" id="msgQueue" hidden></div>
+      <!-- AI 执行中途要问一句：问答卡直接顶掉输入框的位置，答完再还回来 -->
+      <div class="ask-card" id="askCard" hidden></div>
+      <div class="composer" id="composer">
+        <!-- 选中的图片缩略图挂在这里，发送时随需求一起交给模型 -->
+        <div class="attach-tray" id="attachTray" hidden></div>
+        <input type="file" id="attachInput" accept="image/*" multiple hidden>
+        <textarea id="input" rows="1" placeholder="描述你想完成的任务，Enter 发送 / Shift+Enter 换行"></textarea>
+        <div class="composer-bar">
+          <div class="composer-left">
+            <button class="icon-btn" id="attachBtn" title="添加附件">
+              <svg viewBox="0 0 24 24" class="i"><path d="M17 9l-7.5 7.5a3 3 0 01-4.2-4.2L13 4.8a2 2 0 012.8 2.8L8.6 14.7a1 1 0 01-1.4-1.4L14 6.5"/></svg>
+            </button>
+            <button class="pill-btn" id="approvalBtn" title="切换审批模式">
+              <svg viewBox="0 0 24 24" class="i"><circle cx="12" cy="12" r="9"/><path d="M8.5 12.5l2.5 2.5 4.5-5"/></svg>
+              <span id="approvalLabel">自动审批</span>
+            </button>
+          </div>
+          <div class="composer-right">
+            <button class="pill-btn" id="modelBtn">
+              <span id="modelLabel">未配置模型</span>
+              <svg viewBox="0 0 24 24" class="i caret"><path d="M6 9l6 6 6-6"/></svg>
+            </button>
+            <button class="icon-btn" title="语音输入">
+              <svg viewBox="0 0 24 24" class="i"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0014 0M12 18v3"/></svg>
+            </button>
+            <button class="send" id="sendBtn" title="执行任务">
+              <svg viewBox="0 0 24 24" class="i"><path d="M12 19V5M6 11l6-6 6 6"/></svg>
+            </button>
+            <button class="send stop" id="stopBtn" title="停止当前任务" hidden>
+              <svg viewBox="0 0 24 24" class="i"><rect x="7.5" y="7.5" width="9" height="9" rx="1.5"/></svg>
+            </button>
+          </div>
+        </div>
+      </div>
+      <div class="composer-foot">
+        <div class="foot-left">
+          <span class="dot-workspace" id="footWorkspace">woder</span>
+          <span class="sep">·</span>
+          <span id="footStatus">就绪</span>
+        </div>
+        <!-- 当前会话的上下文占用，点开看分区明细和压缩入口 -->
+        <button class="ctx-chip" id="ctxChip" type="button" title="查看上下文占用">
+          <span class="ctx-bar mini"><i id="ctxMiniFill"></i></span>
+          <span class="ctx-pct" id="ctxPct">--</span>
+        </button>
+      </div>
+    </div>
+  </main>
+
+  <!-- ============ 右侧审阅 / 文件 / 浏览器 ============ -->
+  <aside class="review" id="review">
+    <div class="review-head">
+      <div class="drag strip slim"></div>
+      <!-- 面板页签整条由 app.js 生成：审阅/工作区文件常驻，浏览器/终端从「+」菜单开出来、可关闭 -->
+      <div class="review-tabs" id="panelTabs"></div>
+      <div class="review-head-actions" id="headActionsPanel">
+        <button class="icon-btn" id="btnAdd" title="打开面板">
+          <svg viewBox="0 0 24 24" class="i"><path d="M12 6v12M6 12h12"/></svg>
+        </button>
+        <button class="icon-btn" id="btnRefreshTree" title="刷新" hidden>
+          <svg viewBox="0 0 24 24" class="i"><path d="M20 11a8 8 0 10-1.6 5.3"/><path d="M20 5v6h-6"/></svg>
+        </button>
+        <button class="icon-btn" id="btnZoomMax" title="放大浏览器" hidden>
+          <svg viewBox="0 0 24 24" class="i"><path d="M4 9V4h5M20 15v5h-5M20 9V4h-5M4 15v5h5"/></svg>
+        </button>
+        <button class="icon-btn" id="btnZoomSplit" title="浏览器与对话各占一半" hidden>
+          <svg viewBox="0 0 24 24" class="i"><rect x="3" y="4.5" width="18" height="15" rx="2.5"/><path d="M12 4.5v15"/></svg>
+        </button>
+      </div>
+    </div>
+
+    <div class="review-sub" id="reviewSub">
+      <div class="sub-left">
+        <span class="repo" id="repoName">woder</span>
+        <span class="picker">最后一轮 <svg viewBox="0 0 24 24" class="i caret"><path d="M6 9l6 6 6-6"/></svg></span>
+      </div>
+      <div class="stat" id="diffStat"><span class="add">+0</span><span class="del">−0</span></div>
+    </div>
+
+    <div class="review-body" id="reviewBody">
+      <div class="review-empty">
+        <svg viewBox="0 0 24 24" class="big-i"><path d="M6 3h9l4 4v14H6z"/><path d="M14 3v5h5M9 13h7M9 17h5"/></svg>
+        <p>还没有改动</p>
+        <span>执行任务后，文件改动会以 diff 形式出现在这里</span>
+      </div>
+    </div>
+
+    <!-- 工作区文件：工具栏横跨整块面板固定在顶上（面包屑 + 预览/编辑/保存/树开关），
+         下面才是正文和树两栏，树可以按工具栏上的按钮收起来 -->
+    <div class="files-wrap" id="filesWrap">
+      <div class="fv-bar" id="fvBar" hidden></div>
+      <div class="files-split">
+        <div class="file-view" id="fileView" hidden></div>
+        <div class="tree-col" id="treeCol">
+          <div class="tree-filter">
+            <svg viewBox="0 0 24 24" class="i"><circle cx="11" cy="11" r="6.5"/><path d="M16 16l4.5 4.5"/></svg>
+            <input id="treeFilter" type="search" placeholder="筛选文件…" autocomplete="off" spellcheck="false" />
+          </div>
+          <div class="review-body tree" id="filesBody"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ============ 内置浏览器 ============ -->
+    <div class="browser" id="browserBody">
+      <div class="br-bar">
+        <button class="icon-btn" id="brBack" title="后退">
+          <svg viewBox="0 0 24 24" class="i"><path d="M15 5l-7 7 7 7"/></svg>
+        </button>
+        <button class="icon-btn" id="brForward" title="前进">
+          <svg viewBox="0 0 24 24" class="i"><path d="M9 5l7 7-7 7"/></svg>
+        </button>
+        <button class="icon-btn" id="brReload" title="刷新">
+          <svg viewBox="0 0 24 24" class="i"><path d="M20 11a8 8 0 10-1.6 5.3"/><path d="M20 5v6h-6"/></svg>
+        </button>
+        <div class="br-addr">
+          <svg viewBox="0 0 24 24" class="i"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c2.6 2.7 2.6 15.3 0 18M12 3c-2.6 2.7-2.6 15.3 0 18"/></svg>
+          <input id="brUrl" placeholder="输入网址，例如 localhost:3000" spellcheck="false">
+        </div>
+        <button class="icon-btn" id="brAnnotate" title="注释：点选网页元素加批注">
+          <svg viewBox="0 0 24 24" class="i"><path d="M4 5h16v11H10l-6 5z"/><path d="M8 10h8M8 13h5"/></svg>
+        </button>
+        <button class="icon-btn" id="brShot" title="截图，作为附件放进输入框">
+          <svg viewBox="0 0 24 24" class="i"><rect x="3" y="7" width="18" height="13" rx="2.5"/><circle cx="12" cy="13.5" r="3.5"/><path d="M9 7l1.5-2.5h3L15 7"/></svg>
+        </button>
+        <button class="icon-btn" id="brExternal" title="在外部浏览器打开">
+          <svg viewBox="0 0 24 24" class="i"><path d="M14 4h6v6M20 4l-8.5 8.5"/><path d="M18 14v5a1 1 0 01-1 1H5a1 1 0 01-1-1V7a1 1 0 011-1h5"/></svg>
+        </button>
+        <button class="icon-btn" id="brMore" title="更多">
+          <svg viewBox="0 0 24 24" class="i"><path d="M5 12h.01M12 12h.01M19 12h.01"/></svg>
+        </button>
+      </div>
+
+      <div class="sub-tabs" id="brTabs" hidden></div>
+
+      <div class="br-notes" id="brNotes" hidden>
+        <div class="note-form" id="noteForm" hidden></div>
+        <div class="note-list" id="noteList"></div>
+      </div>
+
+      <div class="br-stage" id="brStage">
+        <div class="br-home" id="brHome">
+          <div class="br-home-head">
+            <span class="br-home-title">Local</span>
+            <button class="icon-btn" id="brLocalRefresh" title="重新检测本地服务">
+              <svg viewBox="0 0 24 24" class="i"><path d="M20 11a8 8 0 10-1.6 5.3"/><path d="M20 5v6h-6"/></svg>
+            </button>
+          </div>
+          <div class="br-local" id="brLocal"></div>
+          <div class="br-empty" id="brEmpty">
+            <svg viewBox="0 0 24 24" class="big-i"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c2.6 2.7 2.6 15.3 0 18M12 3c-2.6 2.7-2.6 15.3 0 18"/></svg>
+            <p>没有本地服务</p>
+            <span>试试输入另一个浏览器地址</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ============ 内置终端：每个页签一条 pty 会话 ============ -->
+    <div class="term" id="termBody">
+      <div class="sub-tabs" id="tmTabs"></div>
+      <div class="tm-stage" id="tmStage"></div>
+    </div>
+
+    <!-- 四个面板页签全关掉以后显示这张入口页，点一张卡片等于在「+」菜单里点同一项 -->
+    <div class="panel-empty" id="panelEmpty" hidden>
+      <div class="pe-list">
+        <button class="pe-card" type="button" data-act="files">
+          <span class="pe-icon"><svg viewBox="0 0 24 24" class="i"><path d="M3 7a2 2 0 012-2h4l2 2h8a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2z"/></svg></span>
+          <span class="pe-text"><b>打开工作区文件</b><i>⌘ ⌥ E</i></span>
+        </button>
+        <button class="pe-card" type="button" data-act="side">
+          <span class="pe-icon"><svg viewBox="0 0 24 24" class="i"><circle cx="12" cy="12" r="9"/><path d="M12 8.5v7M8.5 12h7"/></svg></span>
+          <span class="pe-text"><b>打开侧边任务</b><i>⌘ B</i></span>
+        </button>
+        <button class="pe-card" type="button" data-act="browser">
+          <span class="pe-icon"><svg viewBox="0 0 24 24" class="i"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c2.6 2.7 2.6 15.3 0 18M12 3c-2.6 2.7-2.6 15.3 0 18"/></svg></span>
+          <span class="pe-text"><b>打开内置浏览器</b><i>⌘ T</i></span>
+        </button>
+        <button class="pe-card" type="button" data-act="review">
+          <span class="pe-icon"><svg viewBox="0 0 24 24" class="i"><rect x="4" y="4" width="16" height="16" rx="3"/><path d="M12 9v6M9 12h6"/></svg></span>
+          <span class="pe-text"><b>打开审阅</b><i>⌘ ⇧ G</i></span>
+        </button>
+        <button class="pe-card" type="button" data-act="terminal">
+          <span class="pe-icon"><svg viewBox="0 0 24 24" class="i"><path d="M5 7.5l4.5 4.5L5 16.5"/><path d="M12.5 16.5h6.5"/></svg></span>
+          <span class="pe-text"><b>打开终端</b><i>⌘ ⇧ J</i></span>
+        </button>
+      </div>
+    </div>
+  </aside>
+
+  <!-- ============ 任务监控：审阅面板收着时固定在右侧占一栏，开着时浮在按钮下面 ============ -->
+  <aside class="monitor" id="monitor" hidden>
+    <div class="mon-head">
+      <span class="mon-title">任务监控</span>
+      <button class="icon-btn mon-pin" id="monPin" type="button"></button>
+    </div>
+    <div class="mon-body" id="monBody"></div>
+  </aside>
+</div>
+
+<!-- 面板显示/隐藏按钮：钉在窗口右上角，左右两块面板收起来时它们都不跟着挪 -->
+<div class="win-toggles" id="winToggles">
+  <button class="icon-btn layout-btn" id="btnToggleSide" title="隐藏侧栏">
+    <svg viewBox="0 0 24 24" class="i"><rect x="3" y="4.5" width="18" height="15" rx="2.5"/><path d="M9.5 4.5v15"/><rect class="fill" x="4.2" y="5.7" width="4.1" height="12.6" rx="1"/></svg>
+  </button>
+  <button class="icon-btn layout-btn" id="btnToggleReview" title="隐藏审阅面板">
+    <svg viewBox="0 0 24 24" class="i"><rect x="3" y="4.5" width="18" height="15" rx="2.5"/><path d="M14.5 4.5v15"/><rect class="fill" x="15.7" y="5.7" width="4.1" height="12.6" rx="1"/></svg>
+  </button>
+</div>
+
+<div class="menu" id="sessMenu">
+  <button data-act="rename">重命名</button>
+  <button data-act="delete" class="danger">删除会话</button>
+</div>
+
+<div class="menu" id="wsMenu">
+  <button data-act="rename">重命名</button>
+  <button data-act="pin" id="wsPin">置顶工作区</button>
+  <button data-act="remove" class="danger">移除工作区</button>
+</div>
+
+<div class="menu" id="modelMenu"></div>
+
+<div class="menu" id="brMenu">
+  <button data-act="copy">复制当前地址</button>
+  <button data-act="hard">强制刷新</button>
+  <button data-act="clearnotes">清空这个页面的批注</button>
+</div>
+
+<!-- 「+」打开的面板菜单：每一项都是把某个面板叫出来，不改变当前页签 -->
+<div class="menu" id="brAddMenu">
+  <button class="menu-add" data-act="side">
+    <svg viewBox="0 0 24 24" class="i"><circle cx="12" cy="12" r="9"/><path d="M12 8.5v7M8.5 12h7"/></svg>
+    打开侧边任务
+  </button>
+  <div class="menu-sep"></div>
+  <button class="menu-add" data-act="files">
+    <svg viewBox="0 0 24 24" class="i"><path d="M3 7a2 2 0 012-2h4l2 2h8a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2z"/></svg>
+    打开工作区文件
+  </button>
+  <button class="menu-add" data-act="browser">
+    <svg viewBox="0 0 24 24" class="i"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c2.6 2.7 2.6 15.3 0 18M12 3c-2.6 2.7-2.6 15.3 0 18"/></svg>
+    打开内置浏览器
+  </button>
+  <button class="menu-add" data-act="review">
+    <svg viewBox="0 0 24 24" class="i"><rect x="4" y="4" width="16" height="16" rx="3"/><path d="M12 9v6M9 12h6"/></svg>
+    打开审阅
+  </button>
+  <button class="menu-add" data-act="terminal">
+    <svg viewBox="0 0 24 24" class="i"><path d="M5 7.5l4.5 4.5L5 16.5"/><path d="M12.5 16.5h6.5"/></svg>
+    打开终端
+  </button>
+</div>
+
+<!-- ============ 模型配置弹窗（齿轮：只管名称 / Model ID / Base URL / Key） ============ -->
+<div class="overlay" id="settingsOverlay">
+  <div class="modal wide">
+    <div class="modal-head">
+      <h3>模型配置</h3>
+      <button class="icon-btn" id="btnCloseSettings"><svg viewBox="0 0 24 24" class="i"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
+    </div>
+    <div class="modal-body">
+      <div class="model-cards" id="modelCards"></div>
+      <button class="link-btn add-model" id="btnAddModel" type="button">
+        <svg viewBox="0 0 24 24" class="i"><path d="M12 6v12M6 12h12"/></svg>
+        添加模型
+      </button>
+      <p class="hint" id="cfgHint">一个模型一条配置，Base URL 与 API Key 各自独立；留空表示沿用已保存的密钥。</p>
+    </div>
+    <div class="modal-foot">
+      <button class="ghost" id="btnClearKey">清除全部密钥</button>
+      <span class="foot-space"></span>
+      <button class="ghost" id="btnCancelSettings">取消</button>
+      <button class="primary" id="btnSaveKey">保存</button>
+    </div>
+  </div>
+</div>
+
+<!-- ============ 管理模型弹窗（右下角入口：思考强度 / 显示状态 / 上下文窗口） ============ -->
+<div class="overlay prefs" id="prefsOverlay">
+  <div class="modal prefs-box">
+    <div class="prefs-head">
+      <h3>模型列表</h3>
+      <button class="full-x" id="btnClosePrefs" type="button" title="关闭">
+        <svg viewBox="0 0 24 24" class="i"><path d="M6 6l12 12M18 6L6 18"/></svg>
+      </button>
+    </div>
+    <div class="prefs-body" id="prefsBody">
+      <div class="prefs-panel">
+        <div class="prefs-row prefs-thead">
+          <span class="c-name">模型名称</span>
+          <span class="c-think">思考强度</span>
+          <span class="c-show">显示状态</span>
+          <span class="c-win">上下文窗口</span>
+        </div>
+        <div id="prefsRows"></div>
+        <div class="prefs-empty" id="prefsEmpty" hidden>还没有模型，先在齿轮「模型配置」里添加。</div>
+      </div>
+    </div>
+    <div class="prefs-foot">
+      <span class="foot-note">
+        <svg viewBox="0 0 24 24" class="i"><circle cx="12" cy="12" r="9"/><path d="M12 11v5M12 7.6v.9"/></svg>
+        这些偏好对所有任务生效。运行中的回复保持当前设置，下一轮开始使用新设置。
+      </span>
+      <button class="ghost" id="btnCancelPrefs" type="button">取消</button>
+      <button class="primary" id="btnSavePrefs" type="button">保存设置</button>
+    </div>
+  </div>
+</div>
+
+<!-- 思考强度下拉：挂在 body 上，免得被弹窗的滚动容器裁掉 -->
+<div class="think-menu" id="thinkMenu" hidden></div>
+
+<!-- 上下文窗口卡片：内容整体由 app.js 按主进程返回的分区数据渲染 -->
+<div class="ctx-card" id="ctxCard" hidden></div>
+
+<!-- ============ 用量管理：主窗口内的全屏弹出层，数据与逻辑在 usage.js ============ -->
+<div class="usage-overlay u-app" id="usageOverlay" hidden>
+  <aside class="u-side">
+    <div class="drag strip"></div>
+    <button class="u-back" id="btnBack" type="button">
+      <svg viewBox="0 0 24 24" class="i"><path d="M15 5l-7 7 7 7"/></svg>
+      返回应用
+    </button>
+    <div class="u-group">个人</div>
+    <nav class="u-nav">
+      <button class="u-item active" id="itemUsage" type="button">
+        <svg viewBox="0 0 24 24" class="i"><path d="M12 13l4-4"/><path d="M4.5 17a9 9 0 1115 0"/></svg>
+        用量管理
+      </button>
+    </nav>
+  </aside>
+
+  <main class="u-main">
+    <section class="u-stat-card">
+      <div class="u-stat-label">总使用 Token
+        <span class="u-info" title="当前筛选范围内输入与输出 token 的合计">i</span>
+      </div>
+      <div class="u-stat-big">
+        <svg viewBox="0 0 24 24" class="spark"><path d="M12 3l1.8 4.9L19 9.5l-4.2 2.6L15 17l-3-2.7L9 17l.2-4.9L5 9.5l5.2-1.6z"/></svg>
+        <b id="statTotal">0</b>
+      </div>
+      <div class="u-stat-sub">
+        <div class="u-sub">
+          <span class="u-sub-k">输入 Token</span>
+          <b class="u-sub-v" id="statPrompt">0</b>
+        </div>
+        <div class="u-sub">
+          <span class="u-sub-k">输出 Token</span>
+          <b class="u-sub-v" id="statCompletion">0</b>
+        </div>
+      </div>
+    </section>
+
+    <h2 class="u-title">用量明细</h2>
+
+    <div class="u-filter">
+      <div class="u-seg" id="rangeSeg">
+        <button type="button" data-days="1" class="active">今天</button>
+        <button type="button" data-days="7">7 天</button>
+        <button type="button" data-days="30">30 天</button>
+      </div>
+      <div class="u-dates">
+        <input type="date" id="fromDate" title="开始日期">
+        <span class="u-sep">—</span>
+        <input type="date" id="toDate" title="结束日期">
+      </div>
+      <div class="u-spacer"></div>
+      <select id="modelSel" title="按模型筛选"></select>
+    </div>
+
+    <div class="u-table-wrap">
+      <table class="u-table">
+        <thead>
+          <tr>
+            <th class="c-time">时间</th>
+            <th>使用记录</th>
+            <th class="c-model">模型名称</th>
+            <th class="c-product">产品端</th>
+            <th class="c-num">输入</th>
+            <th class="c-num">输出</th>
+            <th class="c-num">合计</th>
+          </tr>
+        </thead>
+        <tbody id="rows"></tbody>
+      </table>
+      <div class="u-empty" id="empty" hidden>这个筛选条件下还没有用量记录</div>
+    </div>
+  </main>
+</div>
+
+<script src="vendor/xterm.js"></script>
+<script src="vendor/addon-fit.js"></script>
+<script src="markdown.js"></script>
+<script src="app.js"></script>
+<script src="usage.js"></script>
+</body>
+</html>

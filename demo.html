@@ -1,0 +1,382 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Woder - AI 智能工作助手（演示版）</title>
+  <style>
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      min-height: 100vh;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      padding: 20px;
+    }
+
+    .container {
+      width: 100%;
+      max-width: 900px;
+      background: white;
+      border-radius: 20px;
+      box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+      overflow: hidden;
+      max-height: 90vh;
+      display: flex;
+      flex-direction: column;
+    }
+
+    .header {
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      color: white;
+      padding: 25px 30px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+
+    .header h1 {
+      font-size: 28px;
+      margin-bottom: 5px;
+    }
+
+    .header p {
+      font-size: 14px;
+      opacity: 0.9;
+    }
+
+    .demo-badge {
+      background: rgba(255, 255, 255, 0.2);
+      padding: 8px 15px;
+      border-radius: 20px;
+      font-size: 12px;
+      font-weight: 600;
+    }
+
+    .main-content {
+      padding: 30px;
+      flex: 1;
+      overflow-y: auto;
+    }
+
+    .input-section {
+      margin-bottom: 30px;
+    }
+
+    .input-section label {
+      display: block;
+      font-size: 14px;
+      color: #666;
+      margin-bottom: 10px;
+      font-weight: 600;
+    }
+
+    .input-section textarea {
+      width: 100%;
+      padding: 15px;
+      border: 2px solid #e0e0e0;
+      border-radius: 10px;
+      font-size: 16px;
+      resize: vertical;
+      min-height: 100px;
+      transition: border-color 0.3s;
+    }
+
+    .input-section textarea:focus {
+      outline: none;
+      border-color: #667eea;
+    }
+
+    .btn {
+      padding: 15px 40px;
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      color: white;
+      border: none;
+      border-radius: 10px;
+      font-size: 16px;
+      cursor: pointer;
+      transition: transform 0.2s, box-shadow 0.2s;
+    }
+
+    .btn:hover {
+      transform: translateY(-2px);
+      box-shadow: 0 10px 20px rgba(102, 126, 234, 0.4);
+    }
+
+    .btn:active {
+      transform: translateY(0);
+    }
+
+    .results-section {
+      margin-top: 30px;
+    }
+
+    .results-section h3 {
+      font-size: 18px;
+      color: #333;
+      margin-bottom: 20px;
+    }
+
+    .result-card {
+      background: #f8f9fa;
+      border-left: 4px solid #667eea;
+      padding: 20px;
+      margin-bottom: 15px;
+      border-radius: 8px;
+    }
+
+    .result-card h4 {
+      font-size: 16px;
+      color: #333;
+      margin-bottom: 10px;
+    }
+
+    .result-card p {
+      font-size: 14px;
+      color: #666;
+      line-height: 1.6;
+    }
+
+    .status {
+      display: inline-block;
+      padding: 5px 12px;
+      border-radius: 20px;
+      font-size: 12px;
+      font-weight: 600;
+    }
+
+    .status-pending {
+      background: #fff3cd;
+      color: #856404;
+    }
+
+    .status-running {
+      background: #d1ecf1;
+      color: #0c5460;
+    }
+
+    .status-completed {
+      background: #d4edda;
+      color: #155724;
+    }
+
+    .ai-badge {
+      display: inline-block;
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      color: white;
+      padding: 4px 10px;
+      border-radius: 12px;
+      font-size: 11px;
+      font-weight: 600;
+      margin-left: 10px;
+    }
+
+    .skills-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+      gap: 20px;
+      margin-top: 40px;
+    }
+
+    .skill-card {
+      background: white;
+      border: 2px solid #e0e0e0;
+      border-radius: 10px;
+      padding: 20px;
+      text-align: center;
+      transition: transform 0.2s, border-color 0.2s;
+    }
+
+    .skill-card:hover {
+      transform: translateY(-5px);
+      border-color: #667eea;
+    }
+
+    .skill-card h4 {
+      font-size: 16px;
+      color: #333;
+      margin-bottom: 10px;
+    }
+
+    .skill-card p {
+      font-size: 14px;
+      color: #666;
+    }
+
+    .loading {
+      display: inline-block;
+      width: 20px;
+      height: 20px;
+      border: 3px solid rgba(102, 126, 234, 0.3);
+      border-radius: 50%;
+      border-top-color: #667eea;
+      animation: spin 1s ease-in-out infinite;
+    }
+
+    @keyframes spin {
+      to { transform: rotate(360deg); }
+    }
+
+    .info-box {
+      background: #e3f2fd;
+      border-left: 4px solid #2196f3;
+      padding: 15px;
+      margin-bottom: 20px;
+      border-radius: 8px;
+    }
+
+    .info-box h4 {
+      color: #1976d2;
+      margin-bottom: 10px;
+    }
+
+    .info-box ul {
+      margin-left: 20px;
+      color: #666;
+    }
+
+    .info-box li {
+      margin: 5px 0;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="header">
+      <div>
+        <h1>🚀 Woder</h1>
+        <p>AI 智能工作助手 - 你说需求，我来交付</p>
+      </div>
+      <div class="demo-badge">🎯 演示模式</div>
+    </div>
+
+    <div class="main-content">
+      <div class="info-box">
+        <h4>ℹ️ 使用说明</h4>
+        <p>这是一个演示版本，展示 Woder 的用户界面和功能。</p>
+        <ul>
+          <li>输入任务描述，查看 AI 生成的任务计划</li>
+          <li>完整版本需要安装 Electron 并配置 OpenAI API</li>
+          <li>查看项目根目录下的 README.md 了解更多信息</li>
+        </ul>
+      </div>
+
+      <div class="input-section">
+        <label for="userRequest">告诉我你想做什么：</label>
+        <textarea 
+          id="userRequest" 
+          placeholder="例如：帮我整理项目文件 / 从网页提取数据 / 创建一份报告..."
+        ></textarea>
+        <button class="btn" onclick="executeTask()" style="margin-top: 15px;">执行任务</button>
+      </div>
+
+      <div class="results-section" id="resultsSection" style="display: none;">
+        <h3>📊 任务结果</h3>
+        <div id="resultsContainer"></div>
+      </div>
+
+      <div class="skills-grid">
+        <div class="skill-card">
+          <h4>📁 文件处理</h4>
+          <p>读写、转换、组织各类文档</p>
+        </div>
+        <div class="skill-card">
+          <h4>🌐 浏览器自动化</h4>
+          <p>Web 导航、表单填充、数据抓取</p>
+        </div>
+        <div class="skill-card">
+          <h4>🧠 记忆管理</h4>
+          <p>跨会话学习和用户偏好</p>
+        </div>
+        <div class="skill-card">
+          <h4>⚡ 任务规划</h4>
+          <p>复杂需求拆解为可执行步骤</p>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    function executeTask() {
+      const userRequest = document.getElementById('userRequest').value.trim();
+      if (!userRequest) {
+        alert('请输入任务描述');
+        return;
+      }
+
+      // 显示结果区域
+      document.getElementById('resultsSection').style.display = 'block';
+      const resultsContainer = document.getElementById('resultsContainer');
+      resultsContainer.innerHTML = '<p><span class="loading"></span> 正在处理任务...</p>';
+
+      // 模拟 AI 处理
+      setTimeout(() => {
+        let html = `<div class="result-card">
+          <h4>✅ 任务已规划 <span class="ai-badge">AI Powered</span></h4>
+          <p><strong>任务 ID:</strong> demo_${Date.now()}</p>
+          <p><strong>状态:</strong> <span class="status status-completed">completed</span></p>
+          <p><strong>创建时间:</strong> ${new Date().toLocaleString()}</p>
+        </div>`;
+
+        html += '<div class="result-card"><h4>📋 执行步骤</h4><ul>';
+        
+        // 根据输入生成示例步骤
+        if (userRequest.includes('整理')) {
+          html += `
+            <li style="margin: 10px 0; padding-left: 20px;">
+              <strong>1. Discover Files</strong><br>
+              <small>操作：file.discover</small><br>
+              <small>参数：{ path: "./project", recursive: true }</small>
+            </li>
+            <li style="margin: 10px 0; padding-left: 20px;">
+              <strong>2. Classify by Type</strong><br>
+              <small>操作：file.classify</small><br>
+              <small>参数：{ criteria: "extension" }</small><br>
+              <small>依赖：步骤 1</small>
+            </li>
+            <li style="margin: 10px 0; padding-left: 20px;">
+              <strong>3. Reorganize Files</strong><br>
+              <small>操作：file.reorganize</small><br>
+              <small>参数：{ targetPath: "./organized/" }</small><br>
+              <small>依赖：步骤 2</small>
+            </li>
+          `;
+        } else if (userRequest.includes('网页') || userRequest.includes('browser')) {
+          html += `
+            <li style="margin: 10px 0; padding-left: 20px;">
+              <strong>1. Navigate to URL</strong><br>
+              <small>操作：browser.navigate</small><br>
+              <small>参数：{ url: "https://example.com" }</small>
+            </li>
+            <li style="margin: 10px 0; padding-left: 20px;">
+              <strong>2. Extract Data</strong><br>
+              <small>操作：browser.extract</small><br>
+              <small>参数：{ selectors: [".price", ".title"] }</small><br>
+              <small>依赖：步骤 1</small>
+            </li>
+          `;
+        } else {
+          html += `
+            <li style="margin: 10px 0; padding-left: 20px;">
+              <strong>1. Execute Request</strong><br>
+              <small>操作：execute</small><br>
+              <small>参数：{ command: "${userRequest}" }</small>
+            </li>
+          `;
+        }
+        
+        html += '</ul></div>';
+
+        resultsContainer.innerHTML = html;
+      }, 1000);
+    }
+  </script>
+</body>
+</html>
