@@ -5,7 +5,7 @@
   "main": "dist/main/main.js",
   "scripts": {
     "compile": "tsc && node scripts/build-renderer.js",
-    "postinstall": "chmod +x node_modules/node-pty/prebuilds/*/spawn-helper 2>/dev/null; true",
+    "postinstall": "node scripts/postinstall.js",
     "dev": "npm run compile && electron .",
     "build": "npm run compile && electron-builder",
     "build:win": "npm run compile && node scripts/build-win.js",

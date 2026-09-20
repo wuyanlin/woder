@@ -1,0 +1,136 @@
+name: 打包发布
+
+# 提交信息里带「打包」/「dabao」才真正跑，其它 push 只走一次 gate 判断就结束。
+# 也可以在 Actions 页面用「运行工作流」手动强跑一次。
+run-name: 打包 Woder · ${{ github.ref_name }}
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: package-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # 单独一个判断 job：关键字没命中时两个打包 job 直接跳过，不烧 mac runner 的分钟数
+  gate:
+    runs-on: ubuntu-latest
+    outputs:
+      pack: ${{ steps.check.outputs.pack }}
+    steps:
+      - id: check
+        env:
+          # 整个 push 里任意一条提交信息命中就行，不只是最后那条
+          MESSAGES: ${{ join(github.event.commits.*.message, ' ') }}
+        run: |
+          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
+            echo "pack=true" >> "$GITHUB_OUTPUT"
+            echo "手动触发，直接打包"
+          elif [[ "$MESSAGES" == *打包* || "$MESSAGES" == *dabao* ]]; then
+            echo "pack=true" >> "$GITHUB_OUTPUT"
+            echo "提交信息命中关键字，开始打包"
+          else
+            echo "pack=false" >> "$GITHUB_OUTPUT"
+            echo "提交信息里没有「打包」，跳过"
+          fi
+
+  mac:
+    needs: gate
+    if: needs.gate.outputs.pack == 'true'
+    runs-on: macos-latest # arm64 runner，和 electron-builder.yml 里 dmg 的 arch 对齐
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - name: 取锁定的 Electron 版本
+        id: el
+        run: echo "version=$(node -p "require('./package-lock.json').packages['node_modules/electron'].version")" >> "$GITHUB_OUTPUT"
+      - name: 装依赖（拉 Electron ABI 的预编译产物）
+        env:
+          npm_config_runtime: electron
+          npm_config_target: ${{ steps.el.outputs.version }}
+        run: npm ci
+      - name: 自检原生产物 ABI
+        run: npx electron scripts/abi-check.js
+      - name: 打 dmg
+        env:
+          # 没有开发者证书，明确关掉自动找身份的逻辑，免得卡在 keychain 上
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+        run: npm run build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: woder-mac-arm64
+          path: release/*.dmg
+          if-no-files-found: error
+
+  win:
+    needs: gate
+    if: needs.gate.outputs.pack == 'true'
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - name: 取锁定的 Electron 版本
+        id: el
+        shell: bash
+        run: echo "version=$(node -p "require('./package-lock.json').packages['node_modules/electron'].version")" >> "$GITHUB_OUTPUT"
+      - name: 装依赖（拉 Electron ABI 的预编译产物）
+        shell: bash
+        env:
+          npm_config_runtime: electron
+          npm_config_target: ${{ steps.el.outputs.version }}
+        run: npm ci
+      - name: 自检原生产物 ABI
+        shell: bash
+        run: npx electron scripts/abi-check.js
+      # 这里不走 npm run build:win：那个脚本是给 mac 交叉编译准备的（要把本机
+      # darwin 的 sqlite 二进制临时换成 win32 的），在 win runner 上装到的本来就是
+      # win32-x64，而且脚本里的 spawnSync('npx') 在 Windows 上起不来
+      - name: 打 exe
+        shell: bash
+        run: npx electron-builder --win --x64
+      - uses: actions/upload-artifact@v4
+        with:
+          name: woder-win-x64
+          path: release/*.exe
+          if-no-files-found: error
+
+  release:
+    needs: [gate, mac, win]
+    if: needs.gate.outputs.pack == 'true' && needs.mac.result == 'success' && needs.win.result == 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: woder-mac-arm64
+          path: pkg
+      - uses: actions/download-artifact@v4
+        with:
+          name: woder-win-x64
+          path: pkg
+      - name: 发布 Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MESSAGE: ${{ github.event.head_commit.message }}
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          # run_number 递增，同一颗 commit 重跑也不会撞 tag
+          TAG="v${VERSION}-ci.${GITHUB_RUN_NUMBER}"
+          {
+            echo "提交：${MESSAGE%%$'\n'*}"
+            echo "分支：$GITHUB_REF_NAME · commit \`${GITHUB_SHA:0:7}\`"
+            echo "构建：https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+            echo
+            echo "两个包都没有开发者证书签名：macOS 首次打开要右键「打开」，Windows 会过 SmartScreen。"
+          } > notes.md
+          gh release create "$TAG" --target "$GITHUB_SHA" --title "$TAG" --notes-file notes.md pkg/*
