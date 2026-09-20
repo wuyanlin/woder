@@ -230,6 +230,7 @@ document.addEventListener('keydown', e => {
 
 function createSession(workspaceId) {
   const ws = workspaceOf(workspaceId) ?? app.workspaces[0];
+  if (!ws) return null;      // 一个工作区都没有时不建会话，空状态由调用方给提示
   const session = {
     id: `s_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
     workspaceId: ws.id,
@@ -243,8 +244,21 @@ function createSession(workspaceId) {
   return session;
 }
 
+/** 没有工作区哪儿都去不了：页脚说清缺什么、侧栏那枚「+」闪一下，别默默吞掉用户这一下 */
+function needWorkspace() {
+  $('#footStatus').textContent = '先添加一个工作区，Woder 才知道要改哪里的文件';
+  const btn = $('#btnAddWs');
+  btn.classList.add('blink');
+  clearTimeout(needWorkspace.timer);
+  needWorkspace.timer = setTimeout(() => {
+    btn.classList.remove('blink');
+    if (!app.busy) $('#footStatus').textContent = '就绪';
+  }, 3200);
+}
+
 function newSession(workspaceId) {
   if (app.busy) { nudge(); return; }
+  if (!app.workspaces.length) { needWorkspace(); return; }
   const wsId = workspaceId ?? app.activeWorkspaceId ?? app.workspaces[0]?.id;
   const blank = sessionsOf(wsId).find(s => s.turns.length === 0 && s.title === '新的任务');
   const session = blank ?? createSession(wsId);
@@ -1289,6 +1303,7 @@ function renderStream() {
 
   const empty = emptyNode();
   empty.style.display = (!session || session.turns.length === 0) ? '' : 'none';
+  empty.classList.toggle('no-ws', app.workspaces.length === 0);
   if (session) {
     // 已压缩的那部分上面插一条摘要说明，剩下的仍然是完整对话，只是不再进上下文
     const cut = Math.min(session.compressedThrough ?? 0, session.turns.length);
@@ -1511,15 +1526,25 @@ function applyWorkspaces(res) {
   if (!res || !res.workspaces) return;
   app.workspaces = res.workspaces;
   if (!workspaceOf(app.activeWorkspaceId)) {
-    const fallback = sessionsOf(app.workspaces[0].id)[0] ?? null;
+    const first = app.workspaces[0];
+    if (!first) {
+      // 最后一个工作区被移走：回到「还没有工作区」的空状态，归属它的那些会话留在磁盘上
+      app.activeId = null;
+      app.activeWorkspaceId = null;
+      renderStream();
+      renderSidebar();
+      refreshTree(null);
+      return;
+    }
+    const fallback = sessionsOf(first.id)[0] ?? null;
     if (fallback) {
       app.activeId = fallback.id;
       app.activeWorkspaceId = fallback.workspaceId;
       renderStream();
     } else {
       app.activeId = null;
-      app.activeWorkspaceId = app.workspaces[0].id;
-      newSession(app.workspaces[0].id);
+      app.activeWorkspaceId = first.id;
+      newSession(first.id);
       return;
     }
   }
@@ -1693,7 +1718,7 @@ function repaintTree() {
 
 async function refreshTree(workspaceId) {
   const ws = workspaceOf(workspaceId) ?? app.workspaces[0];
-  if (!ws) return;
+  if (!ws) return clearWorkspaceUi();
   const res = await woder.workspace.tree(ws.id);
   if (!res.success) return;
   app.activeWorkspaceId = ws.id;
@@ -1704,6 +1729,16 @@ async function refreshTree(workspaceId) {
   $('#repoName').textContent = ws.name;
 
   treeData = { nodes: res.tree, changed: new Set(sessionDiffs(active()).map(d => d.path)) };
+  repaintTree();
+}
+
+/** 零工作区：页脚、审阅副标题和文件树都清成「还没选」，别留着上一个工作区的名字 */
+function clearWorkspaceUi() {
+  app.workspace = '';
+  $('#accountPath').textContent = '未选择工作区';
+  $('#footWorkspace').textContent = '未选择工作区';
+  $('#repoName').textContent = '未选择工作区';
+  treeData = { nodes: [], changed: new Set() };
   repaintTree();
 }
 
@@ -2133,7 +2168,7 @@ async function submit(rawText, queuedImages) {
   }
 
   const session = active();
-  if (!session) return;
+  if (!session) return needWorkspace();
   const token = ++runToken;
   // 历史要在本轮入栈之前取，否则这一轮的空壳会被当成「上文」发给模型
   const history = sessionHistory(session);
@@ -2536,6 +2571,7 @@ document.querySelectorAll('.sample').forEach(btn => {
 
 $('#btnNewTask').addEventListener('click', () => newSession());
 $('#btnAddWs').addEventListener('click', addWorkspace);
+$('#btnAddWsEmpty').addEventListener('click', addWorkspace);
 
 $('#approvalBtn').addEventListener('click', () => {
   app.autoApprove = !app.autoApprove;
@@ -2612,6 +2648,13 @@ function pctText(ratio) {
 
 async function refreshContext() {
   const session = active();
+  if (!session) {
+    // 没有会话就没有上下文可算，主进程那边也会直接报「没有可用的工作区」
+    ctxState.stat = null;
+    renderContextChip();
+    if (ctxState.open) renderContextCard();
+    return;
+  }
   const res = await woder.context.stat(
     { history: sessionHistory(session), request: $('#input').value.trim() },
     session?.workspaceId
@@ -4384,8 +4427,16 @@ function newTerm() {
   tmViews.set(id, { term, fit, host, tab });
 
   setTerm(id);
+  const wsId = app.activeWorkspaceId ?? undefined;
+  if (!wsId) {
+    // pty 要在某个目录里起，一个工作区都没有就只留一句话
+    tab.dead = true;
+    term.write('\x1b[31m还没有工作区，添加一个才能开终端\x1b[0m\r\n');
+    renderTerminal();
+    return tab;
+  }
   // 先建视图再起 shell：pty 一有输出就往里写，晚一步第一步的提示符就丢了
-  woder.term.create(id, app.activeWorkspaceId ?? undefined).then(res => {
+  woder.term.create(id, wsId).then(res => {
     if (!res?.success) {
       tab.dead = true;
       term.write(`\x1b[31m${res?.message ?? '终端启动失败'}\x1b[0m\r\n`);

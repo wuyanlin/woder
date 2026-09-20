@@ -187,19 +187,14 @@ function makeWorkspace(dir: string): WorkspaceMeta {
   };
 }
 
+/** 工作区列表可以为空：首次启动不再拿 process.cwd() 兜一个默认工作区，由用户自己挑目录 */
 function loadWorkspaces(): WorkspaceMeta[] {
   const stored = memoryManager.getPreference('workspaces') as WorkspaceMeta[] | undefined;
-  const valid = (stored ?? []).filter(w => w?.path && fs.existsSync(w.path));
-  if (valid.length) return valid;
-
-  const seed = [makeWorkspace(process.cwd())];
-  seed[0].pinned = true;
-  memoryManager.savePreference('workspaces', seed);
-  return seed;
+  return (stored ?? []).filter(w => w?.path && fs.existsSync(w.path));
 }
 
 let workspaces = loadWorkspaces();
-fileSkill.authorizePath(workspaces[0].path);
+workspaces.forEach(w => fileSkill.authorizePath(w.path));
 
 function persistWorkspaces(): void {
   memoryManager.savePreference('workspaces', workspaces);
@@ -757,7 +752,6 @@ ipcMain.handle('workspace:update', async (_e, id: string, patch: { name?: string
  * 仅从侧栏移除，不删除磁盘文件
  */
 ipcMain.handle('workspace:remove', async (_e, id: string) => {
-  if (workspaces.length <= 1) return { success: false, message: '至少保留一个工作区' };
   workspaces = workspaces.filter(w => w.id !== id);
   persistWorkspaces();
   return { success: true, workspaces };

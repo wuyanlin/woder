@@ -273,6 +273,24 @@ button, input, select, textarea, .no-drag { -webkit-app-region: no-drag; }
 .sample-t { font-size: 13px; font-weight: 550; }
 .sample-d { font-size: 11.5px; color: var(--text-3); }
 
+/* 零工作区的空状态：示例需求先让位，只留一个「添加工作区」 */
+.empty .empty-none { display: none; }
+.empty.no-ws .empty-none { display: block; }
+.empty.no-ws .empty-ws { display: none; }
+.empty-add {
+  display: inline-flex; align-items: center; gap: 6px;
+  height: 32px; padding: 0 15px;
+  border: none; border-radius: 8px;
+  background: var(--accent); color: #fff;
+  font-size: 12.5px; font-family: inherit; font-weight: 550; cursor: pointer;
+}
+.empty-add:hover { background: #4a4ac4; }
+.empty-add .i { width: 14px; height: 14px; stroke-width: 2; }
+
+/* 缺工作区时提示会落在页脚，侧栏那枚「+」跟着闪两下告诉用户点哪儿 */
+.label-add.blink { color: var(--accent); background: var(--accent-soft); animation: label-blink .8s ease-in-out 3; }
+@keyframes label-blink { 50% { background: var(--accent); color: #fff; } }
+
 /* 消息 */
 .msg { margin-bottom: 20px; animation: rise .22s ease; }
 @keyframes rise { from { opacity: 0; transform: translateY(4px); } }

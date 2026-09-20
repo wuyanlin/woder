@@ -83,23 +83,37 @@
 
     <div class="stream" id="stream">
       <div class="empty" id="empty">
-        <div class="empty-mark">
-          <svg viewBox="0 0 24 24" class="i"><path d="M9 6 4 12l5 6M15 6l5 6-5 6"/></svg>
+        <div class="empty-ws">
+          <div class="empty-mark">
+            <svg viewBox="0 0 24 24" class="i"><path d="M9 6 4 12l5 6M15 6l5 6-5 6"/></svg>
+          </div>
+          <h2>你说需求，我来交付</h2>
+          <p>描述一个任务，Woder 会生成计划列表并逐步执行，改动实时出现在右侧审阅面板。</p>
+          <div class="samples">
+            <button class="sample" data-fill="整理当前工作区的文件，按类型统计并生成一份 Markdown 报告">
+              <span class="sample-t">整理工作区并出报告</span>
+              <span class="sample-d">盘点 → 分类 → 写入报告</span>
+            </button>
+            <button class="sample" data-fill="读取 README.md 并生成一份 300 字以内的摘要">
+              <span class="sample-t">总结指定文件</span>
+              <span class="sample-d">读取 → AI 摘要</span>
+            </button>
+            <button class="sample" data-fill="在 reports 目录下创建一份本周工作周报">
+              <span class="sample-t">创建周报文档</span>
+              <span class="sample-d">建目录 → 写文件</span>
+            </button>
+          </div>
         </div>
-        <h2>你说需求，我来交付</h2>
-        <p>描述一个任务，Woder 会生成计划列表并逐步执行，改动实时出现在右侧审阅面板。</p>
-        <div class="samples">
-          <button class="sample" data-fill="整理当前工作区的文件，按类型统计并生成一份 Markdown 报告">
-            <span class="sample-t">整理工作区并出报告</span>
-            <span class="sample-d">盘点 → 分类 → 写入报告</span>
-          </button>
-          <button class="sample" data-fill="读取 README.md 并生成一份 300 字以内的摘要">
-            <span class="sample-t">总结指定文件</span>
-            <span class="sample-d">读取 → AI 摘要</span>
-          </button>
-          <button class="sample" data-fill="在 reports 目录下创建一份本周工作周报">
-            <span class="sample-t">创建周报文档</span>
-            <span class="sample-d">建目录 → 写文件</span>
+        <!-- 一个工作区都没有：先让用户挑目录，示例需求这时候只会误导人 -->
+        <div class="empty-none">
+          <div class="empty-mark">
+            <svg viewBox="0 0 24 24" class="i"><path d="M3.5 7.5h6l2 2.5h9v9a1.5 1.5 0 01-1.5 1.5H5a1.5 1.5 0 01-1.5-1.5z"/></svg>
+          </div>
+          <h2>先添加一个工作区</h2>
+          <p>Woder 要读写文件、跑命令，得先有一个项目目录。</p>
+          <button class="empty-add" id="btnAddWsEmpty" type="button">
+            <svg viewBox="0 0 24 24" class="i"><path d="M12 6v12M6 12h12"/></svg>
+            添加工作区
           </button>
         </div>
       </div>
