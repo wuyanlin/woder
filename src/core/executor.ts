@@ -411,6 +411,14 @@ export class Executor {
         return { output: text };
       }
 
+      case 'todo.update': {
+        // 进展清单只给界面看，不动文件系统；参数已在 tools 里整形过
+        const todos = Array.isArray(p.todos) ? p.todos : [];
+        if (!todos.length) throw new Error('todo_update 没带 todos');
+        const done = todos.filter((t: any) => t.status === 'done').length;
+        return { output: `已更新待办清单：${done}/${todos.length} 项完成` };
+      }
+
       case 'ask.user': {
         // 问答卡活在渲染层，下发问题、等用户点选。这一步可能等人想很久，
         // 超时给足半小时，不像浏览器动作那样几秒就该判失败。

@@ -4,7 +4,7 @@
 
 import OpenAI from 'openai';
 import { MemoryManager } from './memory';
-import { ContextSection, HistoryMessage, ThinkingLevel, THINKING_BUDGET, statOf } from './context';
+import { ContextSection, HistoryMessage, ThinkingLevel, THINKING_BUDGET, DEFAULT_CONTEXT_WINDOW, statOf } from './context';
 import { openaiTools } from './tools';
 
 export interface AIConfig {
@@ -270,10 +270,15 @@ export class AIEngine {
 
 判断顺序：
 - 打招呼、闲聊、问你是谁、问一个概念、让你解释看到的信息 —— 不调用任何工具，直接回一句中文就结束这一轮。
-- 需求要对文件、网页、命令做点什么 —— 直接调用工具去做，不要反过来问用户「要不要我列一下目录」。
+- 需求要对文件、网页、命令做点什么 —— 先按下面的「进展清单」开工，然后直接调用工具去做，不要反过来问用户「要不要我列一下目录」。
 - 不知道工作区里有什么、某个文件在哪 —— 用 shell_run 跑 find / dir，或 file_grep / file_list 去看清楚再动手，别凭印象猜路径。
 - 需求含糊、必须动文件才能往下做（没说要改哪个文件、要删的东西没点名）—— 用 ask_user 问一句，别猜着做。
-- 说了要做就在这一轮把工具调用出来：只回一句「我先把文件读一遍」就结束，等于什么都没做，用户还得再催一次。`;
+- 说了要做就在这一轮把工具调用出来：只回一句「我先把文件读一遍」就结束，等于什么都没做，用户还得再催一次。
+
+进展清单（要改东西、要跑好几步的需求才用）：
+- 动手之前先 todo_update 一次，把需求拆成 3-6 条待办，全标 pending；第一条标 doing。
+- 每做完一条就再 todo_update 一次，把整张清单重发一遍（全量，不是只发新完成的那条），完成标 done、正在做标 doing。
+- 别为了一句话就能答完的需求列清单，也别每调一次工具都发一张清单，那只会刷屏。`;
   }
 
   /**
@@ -297,13 +302,21 @@ export class AIEngine {
 3. 互不依赖的查询可以在同一轮里一起调用，省下来回。
 4. 网页操作全走内置浏览器：browser_open 之后先 browser_read 拿带序号的元素清单，再 click / type；页面点过、跳转过就要重新 read，别沿用旧序号。
 5. shell_run 就是普通的命令行：查询类的（find、ls、dir、grep 这些）直接跑，会改动东西的命令要先经用户放行；命令原样可执行、不要包 sudo，也不要跑 rm -rf 这类破坏性操作。
-6. 一次任务最多推进 12 轮，快到上限时先把结论说清楚，别在最后一轮开个新查询。
+6. 需求没做完就一直往下推进，别中途停下来问「要不要继续」，也不要因为轮数多就提前收尾；做完再给结论。
 7. 给用户看的文字一律中文、简洁，不要复述工具输出的大段内容。`;
   }
 
   /** 每轮都一样的那部分系统提示。记忆单独一块，上下文统计要分开记账 */
   private agentCorePrompt(): string {
     return [this.agentPersonaBlock(), this.agentRuleBlock(), this.shellBlock()].join('\n\n');
+  }
+
+  /**
+   * agentic 循环里「消息」这一块能占多少 token。长跑几十轮时旧的工具结果按这个数折叠，
+   * 窗口另一半留给系统提示、工具定义和输出，不然网关直接拒收。
+   */
+  messageBudgetTokens(): number {
+    return Math.round((this.config.contextWindow || DEFAULT_CONTEXT_WINDOW) * 0.5);
   }
 
   /** agentic 循环真正要发的系统消息。AgentRunner 和上下文统计都读它，保证两边是同一份。 */

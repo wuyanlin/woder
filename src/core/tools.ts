@@ -51,6 +51,19 @@ export const TOOLS: ToolSpec[] = [
     required: ['question']
   },
   {
+    action: 'todo.update',
+    fn: 'todo_update',
+    desc: '给用户看这轮需求的进展清单。动手之前先列 3-6 条待办，之后每完成一项就整张重发一次（每次都是全量清单，不是新增的那几条）。这一步不动任何文件。',
+    params: {
+      todos: {
+        type: 'array',
+        items: 'string',
+        description: '整张清单，不超过 12 条。每项写成 "要做的事|状态"，状态只能是 pending / doing / done 之一，例如 "读取 admin.php|done"。没写状态按 pending 算'
+      }
+    },
+    required: ['todos']
+  },
+  {
     action: 'file.list',
     fn: 'file_list',
     desc: '列出某个目录下的条目。recursive 为 true 时列整棵子树（结果条数有上限）。',
@@ -346,10 +359,58 @@ export function parseAskOptions(raw: unknown): AskOption[] {
     .filter(o => o.label);
 }
 
+/** 一条待办。界面只认这三种状态，模型写出别的都归到这里面 */
+export interface TodoItem {
+  content: string;
+  status: 'pending' | 'doing' | 'done';
+}
+
+const TODO_STATUS: Record<string, TodoItem['status']> = {
+  pending: 'pending', todo: 'pending', '待办': 'pending', '待做': 'pending', '未开始': 'pending',
+  doing: 'doing', 'in_progress': 'doing', 'in progress': 'doing', '进行中': 'doing', '正在做': 'doing',
+  done: 'done', completed: 'done', complete: 'done', '已完成': 'done', '完成': 'done'
+};
+
+/**
+ * 整形成界面能直接画的待办清单。模型可能给 "内容|done"，也可能给 {content,status}，
+ * 还有人把状态写在中文里、或者在内容前面加个 1. —— 都在这儿抹平；没有内容的丢掉。
+ */
+export function parseTodos(raw: unknown): TodoItem[] {
+  const list = Array.isArray(raw) ? raw : typeof raw === 'string' ? raw.split(/\n+/) : [];
+  return list.slice(0, 12).map((item): TodoItem | null => {
+    let content = '';
+    let status = '';
+    if (typeof item === 'string') {
+      const parts = item.split(/[|｜]/);
+      content = parts.shift() ?? '';
+      status = parts.join(' ');
+    } else if (item && typeof item === 'object') {
+      const o = item as Record<string, any>;
+      content = String(o.content ?? o.text ?? o.title ?? o.task ?? o.name ?? '');
+      status = String(o.status ?? o.state ?? '');
+    }
+    if (!content.trim()) return null;
+    // 状态也可能混在内容里（「读取 admin.php（done）」），单独再捞一次
+    const inline = content.match(/[（(]?\s*(pending|doing|done|in_progress|已完成|进行中|待办)\s*[)）]?\s*$/i);
+    if (inline) {
+      status = status || inline[1];
+      content = content.slice(0, inline.index).trim();
+    }
+    return {
+      content: content.replace(/^\s*[-*•]\s*|^\s*\d+[.、)]\s*/, '').trim().slice(0, 80),
+      status: TODO_STATUS[status.trim().toLowerCase()] ?? 'pending'
+    };
+  })
+    .filter((t): t is TodoItem => !!t);
+}
+
 /** 模型传来的参数按各动作的要求整形成执行器和界面要的形状 */
 export function normalizeArgs(action: string, args: Record<string, any>): Record<string, any> {
   if (action === 'ask.user' && args.options !== undefined) {
     return { ...args, options: parseAskOptions(args.options) };
+  }
+  if (action === 'todo.update') {
+    return { ...args, todos: parseTodos(args.todos) };
   }
   return args;
 }

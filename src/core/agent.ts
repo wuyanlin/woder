@@ -11,10 +11,38 @@ import { Executor, EventSink, ExecutionEvent, ExecutionSummary, RunOptions } fro
 import { TaskStep } from './planner';
 import { FileDiff } from './diff';
 import { byFn, normalizeArgs } from './tools';
-import { HistoryMessage, RequestImage } from './context';
+import { HistoryMessage, RequestImage, estimateTokens } from './context';
 
-/** 一轮任务最多推进这么多轮。到了上限就收尾说明情况，别让它自己转圈转到天荒地老 */
-const MAX_ROUNDS = 12;
+/**
+ * 一段连做的轮数预算。跑满不等于任务做完，只是换个气：接着自动开下一段，
+ * 所以这个数不再像以前那样把用户卡在「请先说继续」上。
+ */
+const ROUNDS_PER_LEG = 12;
+
+/** 自动续跑的段数上限（共 96 轮）。到顶说明需求真做不完或模型在原地打转，别再烧 token */
+const MAX_LEGS = 8;
+
+/** 换段时回灌的那句：明说继续做，别停下来征求同意 */
+const KEEP_GOING = '上一段到点了，但需求还没做完：接着按原需求往下推进，不要停下来问我要不要继续，做完再给结论。';
+
+/**
+ * 从最老的工具结果开始折成一句提要（预算按模型窗口算，见 AIEngine.messageBudgetTokens）。
+ * 只改 content、不删消息：assistant 的 tool_calls 和 tool 消息必须成对，
+ * 少一条网关就直接拒收。
+ */
+function foldOldResults(messages: any[], budgetTokens: number): void {
+  const size = () => messages.reduce((n, m) => n + estimateTokens(String(m.content ?? '')), 0);
+  let total = size();
+  if (total <= budgetTokens) return;
+  for (const m of messages) {
+    if (total <= budgetTokens) return;
+    if (m.role !== 'tool') continue;
+    const text = String(m.content ?? '');
+    if (estimateTokens(text) <= 200) continue;
+    m.content = `${text.slice(0, 200)}\n（这段结果已经用完，为省上下文折叠）`;
+    total = size();
+  }
+}
 
 /** 光表态不调工具最多催这么多次，免得模型反复「我这就去」把回合耗光 */
 const MAX_NUDGES = 2;
@@ -61,6 +89,7 @@ export function stepLabel(action: string, p: Record<string, any>): string {
     case 'browser.screenshot': return '截取页面';
     case 'browser.close': return '关闭浏览器';
     case 'ask.user': return `问用户：${text(p.question, 50)}`;
+    case 'todo.update': return `更新待办清单（${(Array.isArray(p.todos) ? p.todos : []).length} 项）`;
     case 'wait': return `等待 ${Number(p.ms) || 300}ms`;
     default: return text(p.command ?? p.path ?? p.url ?? action, 50) || action;
   }
@@ -93,10 +122,25 @@ export class AgentRunner {
     let seq = 0;
     let round = 0;
     let nudges = 0;
+    let leg = 0;
+    let legRounds = 0;
+    let hitCeiling = false;
 
-    while (round < MAX_ROUNDS) {
+    while (true) {
       if (cancelled()) break;
+      // 一段跑满时模型上一轮还在调工具，说明活儿干到一半：自动接着往下跑，
+      // 不把「说继续」这件事推回给用户。
+      if (legRounds >= ROUNDS_PER_LEG) {
+        if (leg + 1 >= MAX_LEGS) {
+          hitCeiling = true;
+          break;
+        }
+        leg++;
+        legRounds = 0;
+        messages.push({ role: 'user', content: KEEP_GOING });
+      }
       round++;
+      legRounds++;
 
       let turn;
       try {
@@ -178,10 +222,11 @@ export class AgentRunner {
           content: output.length > MAX_FEEDBACK ? `${output.slice(0, MAX_FEEDBACK)}\n⋯ 结果过长已截断 ⋯` : output
         });
       }
+      foldOldResults(messages, this.ai.messageBudgetTokens());
     }
 
-    if (!answer && round >= MAX_ROUNDS) {
-      answer = `这个需求推进了 ${MAX_ROUNDS} 轮还没做完，我先停在这里。接着说「继续」我就接着往下做。`;
+    if (!answer && hitCeiling) {
+      answer = `这个需求推进了 ${round} 轮还没做完，我先停在这里。接着说「继续」我就接着往下做。`;
     }
     if (!answer && steps.length === 0) {
       // 模型既没调工具也没说话，气泡总得留一句能看懂的话，不能空着

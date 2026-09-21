@@ -521,8 +521,14 @@ function buildRunTree(turn) {
     total: plan.steps.length,
     done: 0,
     failed: 0,
+    // 有清单就把流水账收起来；用户手动点开过（led 只在补进第一步时置一次）就不再替他收
+    led: todoLed(turn),
     addHead: node => wrap.after(node)
   };
+  if (turn._rt.led) {
+    wrap.classList.remove('open');
+    title.textContent = runTitle(turn._rt);
+  }
   // agentic 那一轮发出去时还没有步骤，空树先藏着，补进第一行再露出来
   wrap.hidden = plan.steps.length === 0;
   return wrap;
@@ -542,13 +548,19 @@ function appendRunStep(rt, ev) {
   rt.total++;
   const num = rt.chev.querySelector('.chev-num');
   if (num) num.textContent = rt.total;
+  // 模型开始维护待办清单了：进度看清单，这棵流水账让位成折叠区（只让一次）
+  if (step.action === 'todo.update' && !rt.led) {
+    rt.led = true;
+    rt.wrap.classList.remove('open');
+    rt.title.textContent = runTitle(rt);
+  }
   return cell;
 }
 
 
 /** 第一层标题：总步数，以及失败几次（跟截图里那行一个说法） */
 function runTitle(rt) {
-  const bits = [`执行 ${rt.total} 步`];
+  const bits = [rt.led ? `执行明细 ${rt.total} 步` : `执行 ${rt.total} 步`];
   if (rt.failed) bits.push(`其中 ${rt.failed} 次失败`);
   return bits.join('，');
 }
@@ -664,6 +676,27 @@ let progressZone = 'steps';
  * 浮标本体的节点在 index.html 里写死了，这里只改文字。整块 innerHTML 重建会把
  * 鼠标底下那个元素换掉，浏览器当成指针离开，悬停明细刚开就被收走，根本点不到。
  */
+/**
+ * 这轮模型有没有开始维护待办清单。有清单的话，清单当主视图（浮标和它的弹层），
+ * 一步步的执行明细收进折叠区——几十步的流水账铺在会话里，反而看不见进展。
+ */
+const todoLed = turn => (turn?.plan?.steps ?? []).some(step => step.action === 'todo.update');
+
+/**
+ * 这轮模型维护的待办清单：todo_update 每次发的都是全量，所以取最后一条非空的。
+ * 参数在主进程那边已经由 parseTodos 整形成 {content,status}，这里只管画。
+ */
+function turnTodos(turn) {
+  let todos = [];
+  (turn?.plan?.steps ?? []).forEach(step => {
+    const list = Array.isArray(step.params?.todos) ? step.params.todos : [];
+    if (step.action === 'todo.update' && list.length) todos = list;
+  });
+  return todos;
+}
+
+const TODO_WORD = { done: '已完成', doing: '进行中', pending: '待办' };
+
 function renderProgress() {
   const turn = app.liveTurn;
   const rt = turn?._rt;
@@ -675,7 +708,11 @@ function renderProgress() {
     return;
   }
   const diffs = turnDiffs(turn);
-  $('#rpSteps').textContent = `步骤 ${rt.done} / ${rt.total}`;
+  const todos = turnTodos(turn);
+  // 模型开始维护清单了，浮标就说清单的话：几十条流水账计到「步骤 37/40」没有意义
+  $('#rpSteps').textContent = todos.length
+    ? `待办 ${todos.filter(t => t.status === 'done').length} / ${todos.length}`
+    : `步骤 ${rt.done} / ${rt.total}`;
   const zone = $('#rpFilesZone');
   zone.hidden = !diffs.length;
   if (diffs.length) {
@@ -714,6 +751,22 @@ function renderProgressPop(turn, diffs) {
       n.innerHTML = `<b class="add">+${escHtml(d.additions)}</b><b class="del">−${escHtml(d.deletions)}</b>`;
       row.appendChild(n);
       row.addEventListener('click', () => focusReviewDiff(d.path));
+      pop.appendChild(row);
+    });
+    pop.hidden = false;
+    return;
+  }
+  const todos = turnTodos(turn);
+  if (todos.length) {
+    // 有清单就报清单：执行明细在气泡里那个折叠区还留着，不用挤在这弹层里
+    pop.appendChild(el('div', 'rp-title', `待办清单 ${todos.filter(t => t.status === 'done').length} / ${todos.length}`));
+    todos.forEach(t => {
+      const row = el('div', `rp-step rp-todo s-${t.status}`);
+      const ico = el('span', `rp-ico s-${t.status === 'done' ? 'completed' : t.status === 'doing' ? 'running' : 'pending'}`);
+      ico.innerHTML = ICON[t.status === 'done' ? 'completed' : t.status === 'doing' ? 'running' : 'pending'];
+      row.appendChild(ico);
+      row.appendChild(el('span', 'rp-step-name', t.content));
+      row.appendChild(el('span', `rp-step-word t-${t.status}`, TODO_WORD[t.status] ?? '待办'));
       pop.appendChild(row);
     });
     pop.hidden = false;
@@ -2368,14 +2421,11 @@ woder.onTaskEvent(ev => {
  */
 const queued = () => active()?.queue ?? [];
 
-function queueMessage(text, images, top) {
+function queueMessage(text, images) {
   const session = active();
   if (!session) return;
   if (!session.queue) session.queue = [];
-  const item = { text, images: images ?? [] };
-  // 问答卡的答案要插到最前面：用户等回答时可能又塞了几条，那些都得以此为语境
-  if (top) session.queue.unshift(item);
-  else session.queue.push(item);
+  session.queue.push({ text, images: images ?? [] });
   renderQueue();
 }
 
@@ -4111,7 +4161,7 @@ const AGENT_COMMANDS = {
 /**
  * 挂在界面上等回答的那次提问。问题和选项都是模型给的话，一律走 textContent。
  * 卡片顶掉输入框的位置（跟输入框抢同一块地方，用户的眼神只用看一处），
- * 答案作为这一步的输出回给执行器，同时排进队列最前面，这一轮收尾就自动接着发。
+ * 答案只作为这一步的输出回给执行器，本轮的模型立刻就能拿到，不再另发一条消息。
  */
 let askPending = null;
 let askHi = 0;
@@ -4209,8 +4259,8 @@ function closeAsk() {
 
 /**
  * 把问题画成问答卡并等回答：点选项 / 输入其他答案 resolve，取消则 reject。
- * echo=false 是放行确认这类「只给执行器看的回答」：答案回给主进程就当说完，
- * 不该再冒充用户新发一条需求，否则会凭空多出一轮。
+ * 放行确认（echo:false）和模型提问走同一条路：答案只回给主进程这一步，
+ * 界面不再把它当成用户新发的一条需求。
  */
 function askUser(params) {
   if (askPending) return Promise.reject(new Error('界面上已经有一个问题在等回答'));
@@ -4221,7 +4271,7 @@ function askUser(params) {
     .map(o => ({ label: String(o.label).trim(), detail: String(o.detail ?? ''), recommended: !!o.recommended }));
   askHi = Math.max(0, options.findIndex(o => o.recommended));
   return new Promise((resolve, reject) => {
-    askPending = { resolve, reject, echo: params?.echo !== false };
+    askPending = { resolve, reject };
     renderAskCard(question, options);
   });
 }
@@ -4231,9 +4281,10 @@ function answerAsk(text) {
   const value = String(text ?? '').trim();
   if (!pending || !value) return;
   closeAsk();
+  // 答案只当作这一步的输出回给执行器，本轮的模型马上就能拿到。
+  // 别再把它塞进队列：那等于本轮结束后拿用户的一句回答冒充新需求再发一遍，
+  // 连续问答时会攒出一串莫名其妙的待发消息。下一轮的语境由 turnAnswer 带上。
   pending.resolve(value);
-  // 答案排在队列最前面：用户等回答时可能还塞了别的话，那些要以这条为语境
-  if (pending.echo !== false) queueMessage(value, null, true);
 }
 
 function rejectAsk(why) {

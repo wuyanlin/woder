@@ -635,6 +635,15 @@ button, input, select, textarea, .no-drag { -webkit-app-region: no-drag; }
 }
 .rp-file .rp-count { flex: none; }
 
+/* ---- 待办清单：模型自己维护的进展，跑长任务时它比执行流水账有用 ---- */
+.rp-todo .rp-step-name { flex: 1; }
+.rp-todo.s-done .rp-ico { color: var(--ok); }
+.rp-todo.s-done .rp-step-name { color: var(--text-3); text-decoration: line-through; text-decoration-color: rgba(0,0,0,.22); }
+.rp-todo.s-done .t-done { color: var(--ok); }
+.rp-todo.s-doing .rp-ico { color: var(--accent); }
+.rp-todo.s-doing .rp-step-name { font-weight: 600; }
+.rp-todo.s-doing .t-doing { color: var(--accent); }
+
 /* ---- 排队中的需求：跑完这一轮自动发 ---- */
 .msg-queue {
   margin-bottom: 8px; padding: 3px 10px;
