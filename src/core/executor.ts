@@ -8,7 +8,7 @@ import { spawn } from 'child_process';
 import { TaskPlan, TaskStep } from './planner';
 import { FileSkill } from '../skills/file-skill';
 import { AIEngine } from './ai-engine';
-import { isMutating } from './tools';
+import { isMutating, parseAskOptions } from './tools';
 import { diffLines, FileDiff } from './diff';
 
 export type StepStatus = 'pending' | 'running' | 'completed' | 'failed' | 'skipped';
@@ -416,11 +416,9 @@ export class Executor {
         // 超时给足半小时，不像浏览器动作那样几秒就该判失败。
         const question = typeof p.question === 'string' ? p.question.trim() : '';
         if (!question) throw new Error('ask.user 缺少 question');
-        const options = (Array.isArray(p.options) ? p.options : []).slice(0, 6).map((o: any, i: number) => ({
-          label: String(o?.label ?? `选项 ${i + 1}`).slice(0, 60),
-          detail: String(o?.detail ?? '').slice(0, 160),
-          recommended: !!o?.recommended
-        }));
+        // 模型常把选项写成 "标签|说明" 的字符串，先整形成界面要的形状。
+        // 不再兜「选项 1」这种占位名——那张卡等于没问，用户只能瞎点。
+        const options = parseAskOptions(p.options);
         const res = await this.browser.call('ask.user', { question, options }, ASK_TIMEOUT_MS);
         const answer = String(res?.answer ?? '').trim();
         if (!answer) throw new Error('没有收到回答');

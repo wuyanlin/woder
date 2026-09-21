@@ -131,10 +131,13 @@ body.usage-open .win-toggles { display: none; }
 
 .u-table-wrap {
   border: 1px solid var(--border); border-radius: 12px;
-  background: #fff; overflow: hidden;
+  background: #fff;
+  /* 窗口再窄也不许把右边的列挤没：宁可左右滚 */
+  overflow-x: auto;
 }
 
-.u-table { width: 100%; border-collapse: collapse; }
+/* 固定布局：列宽只由表头决定，一条超长记录再也撑不开整张表（原来的 bug） */
+.u-table { width: 100%; min-width: 940px; table-layout: fixed; border-collapse: collapse; }
 
 .u-table th {
   text-align: left; font-weight: 500; font-size: 12.5px; color: var(--text-2);

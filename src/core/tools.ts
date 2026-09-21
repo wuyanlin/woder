@@ -46,7 +46,7 @@ export const TOOLS: ToolSpec[] = [
     desc: '向用户提一个选择题并等他的回答。需求含糊、要改哪个文件没说清、要删的东西没点名时用；答案会作为本步输出回到你的上下文。',
     params: {
       question: { type: 'string', description: '一句话中文问题' },
-      options: { type: 'array', items: 'string', description: '2-4 个候选答案，每项写成 "标签|说明选它会怎样"，可省说明' }
+      options: { type: 'array', items: 'string', description: '2-4 个候选答案，每项一个字符串，写成 "选项原话|选了它我会怎么做"。标签要写成用户一眼能懂的具体内容，别写「选项1」「方案A」这种没信息量的占位' }
     },
     required: ['question']
   },
@@ -307,6 +307,51 @@ export function isReadOnlyShellCommand(command: string): boolean {
       if (cmd === 'git') return GIT_READ_ONLY.has(argv[1] ?? '');
       return true;
     });
+}
+
+export interface AskOption {
+  label: string;
+  detail: string;
+  recommended?: boolean;
+}
+
+/**
+ * 模型给选项的写法不固定：按 schema 该是「标签|选了会怎样」，也常见直接给对象、
+ * 或者在标签前面自己编个号。统一整形成界面要的形状，没有标签的那条丢掉。
+ */
+export function parseAskOptions(raw: unknown): AskOption[] {
+  const list = Array.isArray(raw) ? raw : typeof raw === 'string' ? raw.split(/\n+/) : [];
+  return list.slice(0, 6).map((item): AskOption | null => {
+    if (typeof item === 'string') {
+      const [label, ...rest] = item.split(/[|｜]/);
+      return { label: label ?? '', detail: rest.join(' ').trim() };
+    }
+    if (item && typeof item === 'object') {
+      const o = item as Record<string, any>;
+      const [label, ...rest] = String(o.label ?? o.text ?? o.name ?? '').split(/[|｜]/);
+      return {
+        label,
+        detail: String(o.detail ?? o.desc ?? o.description ?? rest.join(' ')).trim(),
+        recommended: !!o.recommended
+      };
+    }
+    return null;
+  })
+    .filter((o): o is AskOption => !!o)
+    .map(o => ({
+      label: o.label.replace(/^\s*\d+[.、)]\s+/, '').trim().slice(0, 60),
+      detail: o.detail.trim().slice(0, 160),
+      recommended: o.recommended
+    }))
+    .filter(o => o.label);
+}
+
+/** 模型传来的参数按各动作的要求整形成执行器和界面要的形状 */
+export function normalizeArgs(action: string, args: Record<string, any>): Record<string, any> {
+  if (action === 'ask.user' && args.options !== undefined) {
+    return { ...args, options: parseAskOptions(args.options) };
+  }
+  return args;
 }
 
 /** 这个 action 会不会改动工作区/外部状态。shell_run 要看具体命令，其余照定义 */

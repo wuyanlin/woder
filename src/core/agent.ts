@@ -10,11 +10,23 @@ import { AIEngine } from './ai-engine';
 import { Executor, EventSink, ExecutionEvent, ExecutionSummary, RunOptions } from './executor';
 import { TaskStep } from './planner';
 import { FileDiff } from './diff';
-import { byFn } from './tools';
+import { byFn, normalizeArgs } from './tools';
 import { HistoryMessage, RequestImage } from './context';
 
 /** 一轮任务最多推进这么多轮。到了上限就收尾说明情况，别让它自己转圈转到天荒地老 */
 const MAX_ROUNDS = 12;
+
+/** 光表态不调工具最多催这么多次，免得模型反复「我这就去」把回合耗光 */
+const MAX_NUDGES = 2;
+
+/**
+ * flash 级模型常把「我先把文件读一遍」当成一句话说完就收尾，需求一个字没动。
+ * 这里只认「第一人称 + 马上要做的动作」那种句式；已经做完的（「我改好了」）、
+ * 自我介绍里的（「我可以帮你读写文件」）都不算，纯聊天的回答不会被催。
+ */
+const ONLY_INTENT = /(?:我|让我|这就|马上|接下来|下面|待我)[^。，,；;]{0,12}(?:先|去|来|再|着手|尝试)?[^。，,；;]{0,4}(?:读|查看|看一下|看一遍|看看|查|找|列|搜|翻|打开|运行|执行|跑|确认|检查|核对|对比|改|写入|写进|补|加|删|移动|动手|下手)(?!了|好|过|完)/i;
+
+const NUDGE = '你刚才只说了要做什么，没有真的调用工具。现在就把那个动作调用出来；确实不需要工具的话，直接给结论，别再重复这句话。';
 
 /** 单个工具结果回灌给模型的长度。界面那份已经截过，这里是第二道闸，防止一次 find 把上下文吃光 */
 const MAX_FEEDBACK = 4000;
@@ -80,6 +92,7 @@ export class AgentRunner {
     let answer = '';
     let seq = 0;
     let round = 0;
+    let nudges = 0;
 
     while (round < MAX_ROUNDS) {
       if (cancelled()) break;
@@ -101,7 +114,17 @@ export class AgentRunner {
       // 边说边做是允许的：这句话先记下，没有后续工具调用时它就是最终回答
       if (turn.text) answer = turn.text;
 
-      if (!turn.toolCalls.length) break;
+      if (!turn.toolCalls.length) {
+        // 只回了一句「我先把文件读一遍」却没带函数调用：这一轮等于没干活，催它真去做。
+        // 纯聊天（打招呼、答概念）不命中那个句式，照旧直接结束，不会被多拖一个来回。
+        if (nudges < MAX_NUDGES && ONLY_INTENT.test(turn.text)) {
+          nudges++;
+          messages.push({ role: 'assistant', content: turn.text });
+          messages.push({ role: 'user', content: NUDGE });
+          continue;
+        }
+        break;
+      }
 
       messages.push({
         role: 'assistant',
@@ -116,7 +139,8 @@ export class AgentRunner {
       for (const call of turn.toolCalls) {
         const spec = byFn(call.fn);
         const action = spec?.action ?? call.fn;
-        const params = call.args ?? {};
+        // 参数在进门这一步就整形成界面要的形状：树里存的就是它，别等到下发时才改
+        const params = normalizeArgs(action, call.args ?? {});
         const step = this.synthetic(stepLabel(action, params), action, params, `s${++seq}`);
         steps.push(step);
 

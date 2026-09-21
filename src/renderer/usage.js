@@ -59,7 +59,7 @@
         return cell;
       };
       tr.appendChild(td('c-time', fmtTime(r.ts)));
-      const rec = td(null, r.text);
+      const rec = td('c-rec', r.text);
       rec.title = r.text;
       tr.appendChild(rec);
       tr.appendChild(td('c-model', r.model));
